@@ -8,6 +8,11 @@ find parked cars and jack them, drift to fill your nitro, hit jumps.
 
 ## Play
 
+**Live: https://fairbay-heat.vercel.app** (deployed on Vercel; every push to `main` on
+[GitHub](https://github.com/DIVYAPRIYADHARSHINI-GIT/fairbay-heat) auto-deploys).
+
+Run locally:
+
 ```bash
 npm install
 npm run dev        # http://localhost:5173
@@ -107,6 +112,7 @@ npm test     # typecheck + unit + e2e
   Screenshots land in `docs/screenshots/`.
 
 Measured: **60 fps at 1440 × 900** (Apple M1, Chrome, High quality).
+The e2e suite also passes against the live site: `node tests/e2e.mjs https://fairbay-heat.vercel.app`.
 `FH_GPU=0 node tests/e2e.mjs` runs the suite on software GL instead.
 
 ## Roadmap
