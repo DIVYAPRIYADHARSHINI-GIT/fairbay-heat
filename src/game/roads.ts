@@ -732,8 +732,12 @@ export class RoadNetwork {
     return out;
   }
 
-  /** Nearest road centreline point within `radius` metres. */
-  nearestRoad(x: number, z: number, radius = 60): { road: Road; s: number; lat: number; dist: number } | null {
+  /**
+   * Nearest road centreline point within `radius` metres. With `y` (the
+   * asker's height), roads more than 4 m above or below are ignored, so a
+   * car on the viaduct finds the viaduct, not the street underneath.
+   */
+  nearestRoad(x: number, z: number, radius = 60, y?: number): { road: Road; s: number; lat: number; dist: number } | null {
     let best: { road: Road; s: number; lat: number; dist: number } | null = null;
     const r0 = Math.ceil(radius / this.cell);
     const cx = Math.floor(x / this.cell);
@@ -748,6 +752,7 @@ export class RoadNetwork {
           if (seen.has(k)) continue;
           seen.add(k);
           const p = r.center.projectSegment(x, z, i);
+          if (y !== undefined && Math.abs(r.heightAt(p.s) - y) > 4) continue;
           if (p.dist <= radius && (!best || p.dist < best.dist)) best = { road: r, s: p.s, lat: p.lat, dist: p.dist };
         }
       }

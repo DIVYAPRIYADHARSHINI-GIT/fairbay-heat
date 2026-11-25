@@ -630,3 +630,150 @@ kbd {
     animation: none;
   }
 }
+
+/* ---- Stage 3: pursuit HUD ------------------------------------------------ */
+.heat {
+  position: absolute;
+  top: 18px;
+  right: 22px;
+  min-width: 230px;
+  padding: 10px 14px 12px;
+  border-radius: 12px;
+  background: rgba(10, 12, 18, 0.72);
+  border: 1px solid var(--line);
+  text-align: right;
+  opacity: 0;
+  transform: translateY(-6px);
+  transition: opacity 0.25s, transform 0.25s, border-color 0.25s;
+}
+.heat.show {
+  opacity: 1;
+  transform: none;
+}
+.heat[data-state="pursuit"] {
+  border-color: rgba(255, 70, 60, 0.7);
+  animation: heatPulse 1s ease-in-out infinite;
+}
+.heat[data-state="cooldown"] {
+  border-color: rgba(80, 150, 255, 0.7);
+}
+.heat[data-state="escaped"] {
+  border-color: rgba(120, 230, 140, 0.8);
+}
+@keyframes heatPulse {
+  0%, 100% { box-shadow: 0 0 0 rgba(255, 40, 40, 0); }
+  50% { box-shadow: 0 0 26px rgba(255, 40, 40, 0.45); }
+}
+.heat-stars {
+  font-size: 24px;
+  letter-spacing: 3px;
+  line-height: 1;
+}
+.heat-stars .star {
+  color: rgba(255, 255, 255, 0.18);
+  transition: color 0.3s, text-shadow 0.3s;
+}
+.heat-stars .star.on {
+  color: #ff4d3d;
+  text-shadow: 0 0 12px rgba(255, 60, 40, 0.8);
+}
+.heat[data-state="cooldown"] .heat-stars .star.on {
+  color: #6aa8ff;
+  text-shadow: 0 0 12px rgba(80, 150, 255, 0.8);
+}
+.heat-label {
+  margin-top: 6px;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  color: var(--ink);
+}
+.heat-bar {
+  margin-top: 6px;
+  height: 5px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.12);
+  overflow: hidden;
+}
+.heat-bar i {
+  display: block;
+  height: 100%;
+  width: 0;
+  background: linear-gradient(90deg, #3aa0ff, #7ee0ff);
+  transition: width 0.15s linear;
+}
+.heat-bounty {
+  margin-top: 6px;
+  font-size: 13px;
+  font-weight: 800;
+  font-style: italic;
+  color: var(--accent-2);
+}
+.bust {
+  position: absolute;
+  bottom: 30%;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 280px;
+  text-align: center;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+.bust.show {
+  opacity: 1;
+}
+.bust-label {
+  font-weight: 900;
+  font-style: italic;
+  letter-spacing: 0.15em;
+  color: #ff5a4d;
+  text-shadow: 0 2px 10px #000;
+}
+.bust-bar {
+  margin-top: 6px;
+  height: 8px;
+  border-radius: 4px;
+  background: rgba(10, 12, 18, 0.7);
+  border: 1px solid rgba(255, 90, 77, 0.6);
+  overflow: hidden;
+}
+.bust-bar i {
+  display: block;
+  height: 100%;
+  width: 0;
+  background: linear-gradient(90deg, #ff8a00, #ff2e3a);
+}
+.result {
+  position: absolute;
+  top: 34%;
+  left: 0;
+  right: 0;
+  text-align: center;
+  opacity: 0;
+  transform: scale(0.96);
+  transition: opacity 0.3s, transform 0.3s;
+}
+.result.show {
+  opacity: 1;
+  transform: none;
+}
+.r-title {
+  font-size: clamp(40px, 7vw, 84px);
+  font-weight: 900;
+  font-style: italic;
+  letter-spacing: 0.04em;
+  text-shadow: 0 6px 40px rgba(0, 0, 0, 0.7);
+}
+.result[data-kind="busted"] .r-title {
+  color: #ff4d3d;
+}
+.result[data-kind="escaped"] .r-title {
+  color: #7ee081;
+}
+.r-sub {
+  margin-top: 8px;
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--ink);
+  text-shadow: 0 2px 12px #000;
+}

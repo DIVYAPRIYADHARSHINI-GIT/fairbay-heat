@@ -496,6 +496,120 @@ try {
   check("you stay on your own level (viaduct vs underneath) and keep driving", below.speedKmh > 20 && top.speedKmh > 20 && top.y > 10, `deck ${top.speedKmh.toFixed(0)} km/h, street ${below.speedKmh.toFixed(0)} km/h`);
   await brakeToStop(page);
 
+  section("Stage 3: police chases");
+  // A patrol car in traffic, 70 m ahead in the opposite lane, facing us.
+  await page.evaluate(() => {
+    const g = window.__fh;
+    g.env.setHours(13);
+    g.env.speed = 0;
+    g.traffic.clear();
+    g.traffic.enabled = true;
+    g.traffic.target = 0;
+    g.police.standDown();
+    g.police.patrolTarget = 0;
+    g.heat.reset();
+    const r = g.city.net.road("kings-2");
+    const s = r.s0 + (r.s1 - r.s0) * 0.25;
+    const p = g.city.net.pointOn("kings-2", s, r.laneOffset(0));
+    g.teleport(p.x, p.z, p.heading);
+    const lane = r.lanesBwd[0];
+    const proj = lane.poly.project(p.x, p.z);
+    g.traffic.add(lane, Math.max(5, proj.s - 150), g.policeModel);
+  });
+  s = await snap(page);
+  check("a police patrol drives in traffic", s.patrols === 1 && s.heatState === "calm", `${s.patrols} patrols, ${s.heatState}`);
+  // Speed past it: hold W (and nitro) until the chase starts.
+  await page.keyboard.down("KeyW");
+  await page.keyboard.down("ShiftLeft");
+  const started = await page
+    .waitForFunction(() => window.__fh.heat.state === "pursuit", { timeout: 30000, polling: 100 })
+    .then(() => true)
+    .catch(() => false);
+  await page.keyboard.up("ShiftLeft");
+  await page.keyboard.up("KeyW");
+  s = await snap(page);
+  check("speeding past the patrol starts a pursuit (heat 1)", started && s.heat >= 1, `${s.heatState}, ${s.speedKmh.toFixed(0)} km/h`);
+  check("the patrol car joins the chase as a pursuit unit", s.units >= 1 && s.patrols === 0, `${s.units} units`);
+  const heatUi = await page.$eval(".heat", (e) => ({ show: e.classList.contains("show"), stars: e.querySelectorAll(".star.on").length, text: e.textContent }));
+  check("the HUD shows the heat meter with stars and the bounty", heatUi.show && heatUi.stars >= 1 && /BOUNTY/.test(heatUi.text), heatUi.text);
+  const toastP = await page.$$eval(".toast .t-title", (n) => n.map((e) => e.textContent));
+  check("a PURSUIT alert appears", toastP.includes("PURSUIT"), toastP.join(" | "));
+  await brakeToStop(page);
+  await waitSim(page, 1.5);
+  await shot("22-pursuit");
+  // Stop and let them box you in: the busted meter fills.
+  const busted = await page
+    .waitForFunction(() => window.__fh.heat.state === "busted", { timeout: 90000, polling: 200 })
+    .then(() => true)
+    .catch(() => false);
+  s = await snap(page);
+  check("stopping with a unit alongside gets you busted", busted, `${s.heatState} bust=${s.bust.toFixed(2)} units=${s.units}`);
+  if (busted) await shot("23-busted");
+  const res = await page.$eval(".result", (e) => ({ show: e.classList.contains("show"), text: e.textContent }));
+  check("a BUSTED screen is shown", res.show && /BUSTED/.test(res.text), res.text);
+  await page.waitForFunction(() => window.__fh.heat.state === "calm", { timeout: 20000 });
+  s = await snap(page);
+  check("after a bust the chase is over and the police leave", s.heatState === "calm" && s.units === 0 && s.busts === 1, `${s.heatState}, ${s.units} units`);
+
+  // Heat 3: roadblocks, sirens, units on the roads.
+  await onRoad("main-2", 0.15, 0, true);
+  await page.evaluate(() => {
+    const g = window.__fh;
+    g.traffic.target = 48;
+    g.heat.force(3);
+    g.police.blockCool = 0;
+  });
+  await page.keyboard.down("KeyW");
+  const block = await page
+    .waitForFunction(() => window.__fh.police.roadblocks.length > 0, { timeout: 30000, polling: 200 })
+    .then(() => true)
+    .catch(() => false);
+  await page.keyboard.up("KeyW");
+  s = await snap(page);
+  check("at heat 3 a roadblock is set up on the road ahead", block && s.roadblocks === 1, `${s.roadblocks} roadblocks`);
+  const rbInfo = await page.evaluate(() => {
+    const g = window.__fh;
+    const rb = g.police.roadblocks[0];
+    if (!rb) return null;
+    return { d: Math.hypot(rb.x - g.car.x, rb.z - g.car.z), cars: rb.units.length, x: rb.x, z: rb.z, h: rb.heading };
+  });
+  check("...ahead of you and out of sight, with at least two police cars", !!rbInfo && rbInfo.d > 100 && rbInfo.cars >= 2, JSON.stringify(rbInfo));
+  if (rbInfo) {
+    await page.evaluate((rb) => {
+      const g = window.__fh;
+      g.teleport(rb.x - Math.sin(rb.h) * 30, rb.z - Math.cos(rb.h) * 30, rb.h);
+    }, rbInfo);
+    await waitSim(page, 0.6);
+    await shot("24-roadblock");
+  }
+  await waitSim(page, 3);
+  s = await snap(page);
+  check("more units join at higher heat", s.units >= 2, `${s.units} units at heat ${s.heat}`);
+  const sirens = await page.evaluate(() => window.__fh.audio.sirenCount);
+  check("police sirens are playing", sirens >= 1, `${sirens} siren voices`);
+  const blips = await page.evaluate(() => window.__fh.police.units.length);
+  check("police cars appear on the minimap", blips >= 2);
+  // Escape: get far away and out of sight (teleport across the map), the cooldown runs out.
+  await page.evaluate(() => {
+    const g = window.__fh;
+    const r = g.city.net.road("runway");
+    const p = g.city.net.pointOn("runway", r.s0 + (r.s1 - r.s0) * 0.5, 0);
+    g.teleport(p.x, p.z, p.heading);
+  });
+  const cooled = await page
+    .waitForFunction(() => window.__fh.heat.state === "cooldown", { timeout: 30000, polling: 200 })
+    .then(() => true)
+    .catch(() => false);
+  check("breaking line of sight starts the cooldown", cooled, (await snap(page)).heatState);
+  const escaped = await page
+    .waitForFunction(() => window.__fh.heat.state === "escaped", { timeout: 90000, polling: 200 })
+    .then(() => true)
+    .catch(() => false);
+  s = await snap(page);
+  check("staying hidden through the cooldown escapes and banks the bounty", escaped && s.totalBounty > 0 && s.escapes === 1, `${s.heatState}, bank ${s.totalBounty}`);
+  if (escaped) await shot("25-escaped");
+  await page.waitForFunction(() => window.__fh.heat.state === "calm", { timeout: 20000 });
+
   section("Settings + persistence");
   await press(page, "Escape", 300);
   for (let i = 0; i < 5; i++) await press(page, "ArrowDown", 60);
@@ -512,6 +626,12 @@ try {
   const sens1 = await page.evaluate(() => [window.__fh.save.steering, window.__fh.car.sensitivity]);
   check("steering sensitivity can be raised in Settings and applies to the car", sens1[0] > sens0 && sens1[1] === sens1[0], `${sens0} -> ${sens1[0]} (car ${sens1[1]})`);
   await press(page, "ArrowLeft", 200);
+  await press(page, "ArrowDown", 60);
+  await press(page, "ArrowRight", 200);
+  const polOff = await page.evaluate(() => [window.__fh.save.police, window.__fh.police.enabled]);
+  await press(page, "ArrowRight", 200);
+  const polOn = await page.evaluate(() => [window.__fh.save.police, window.__fh.police.enabled]);
+  check("Police chases can be switched off (free roam) and back on in Settings", polOff[0] === false && polOff[1] === false && polOn[0] === true && polOn[1] === true, JSON.stringify({ polOff, polOn }));
   await press(page, "Escape", 200);
   await press(page, "Escape", 300);
   check("back out to driving", (await snap(page)).state === "drive");

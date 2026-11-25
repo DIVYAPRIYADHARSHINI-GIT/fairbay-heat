@@ -26,7 +26,15 @@ export interface CarVisual {
   exhausts: THREE.Vector3[];
   rearContacts: THREE.Vector3[];
   headlightAnchor: THREE.Object3D;
+  /** Police light-bar lenses (only on police liveries). */
+  sirenRed: THREE.MeshBasicMaterial | null;
+  sirenBlue: THREE.MeshBasicMaterial | null;
   dispose(): void;
+}
+
+export interface BuildOptions {
+  /** Black-and-white Fairbay PD livery: white doors + roof, POLICE lettering, light bar, push bar. */
+  police?: boolean;
 }
 
 // ---- shared materials ---------------------------------------------------------
@@ -133,6 +141,48 @@ function materials() {
     shadow: new THREE.MeshBasicMaterial({ map: shadowTexture(), transparent: true, depthWrite: false, opacity: 0.85 }),
   };
   return shared;
+}
+
+/** White door panel with POLICE lettering and the Fairbay PD star. */
+function policeDoorTex(): THREE.CanvasTexture {
+  const c = document.createElement("canvas");
+  c.width = 512;
+  c.height = 128;
+  const g = c.getContext("2d")!;
+  g.fillStyle = "#f3f4f6";
+  g.fillRect(0, 0, 512, 128);
+  // Thin blue pinstripe along the bottom.
+  g.fillStyle = "#1d3f8f";
+  g.fillRect(0, 104, 512, 7);
+  // Gold star badge.
+  g.save();
+  g.translate(62, 58);
+  g.fillStyle = "#d4a017";
+  g.beginPath();
+  for (let i = 0; i < 10; i++) {
+    const r = i % 2 ? 15 : 34;
+    const a = (i / 10) * Math.PI * 2 - Math.PI / 2;
+    g.lineTo(Math.cos(a) * r, Math.sin(a) * r);
+  }
+  g.closePath();
+  g.fill();
+  g.fillStyle = "#7a5a00";
+  g.beginPath();
+  g.arc(0, 0, 8, 0, Math.PI * 2);
+  g.fill();
+  g.restore();
+  g.fillStyle = "#0d0f13";
+  g.font = "italic 900 64px system-ui, sans-serif";
+  g.textAlign = "center";
+  g.textBaseline = "middle";
+  g.fillText("POLICE", 290, 52);
+  g.font = "700 19px system-ui, sans-serif";
+  g.fillStyle = "#1d3f8f";
+  g.fillText("FAIRBAY PD  ·  TO PROTECT AND SERVE", 290, 90);
+  const t = new THREE.CanvasTexture(c);
+  t.colorSpace = THREE.SRGBColorSpace;
+  t.anisotropy = 8;
+  return t;
 }
 
 // ---- body profile functions ----------------------------------------------------
@@ -339,7 +389,7 @@ function stationsFor(from: number, to: number, count: number, extra: number[] = 
 
 // ---- car assembly ---------------------------------------------------------------
 
-export function buildCar(def: CarDef, color: string): CarVisual {
+export function buildCar(def: CarDef, color: string, opts: BuildOptions = {}): CarVisual {
   const m = materials();
   const b = def.body;
   const p: Profile = {
@@ -709,6 +759,109 @@ export function buildCar(def: CarDef, color: string): CarVisual {
     }
   }
 
+  // -- police livery --
+  let sirenRed: THREE.MeshBasicMaterial | null = null;
+  let sirenBlue: THREE.MeshBasicMaterial | null = null;
+  if (opts.police) {
+    const white = new THREE.MeshPhysicalMaterial({ color: 0xf3f4f6, metalness: 0.2, roughness: 0.35, clearcoat: 1, clearcoatRoughness: 0.08 });
+    // Body side at height y (the tub's cross-section, as lofted above).
+    const sideX = (s: number, y: number): number => {
+      const w = halfWidth(p, s);
+      const top = beltline(p, s);
+      const bot = Math.min(underside(p, s), top - 0.06);
+      const h = top - bot;
+      const pts: [number, number][] = [
+        [bot, w * 0.86],
+        [bot + h * 0.12, w * 0.97],
+        [bot + h * 0.4, w],
+        [bot + h * 0.72, w * 0.985],
+        [top - 0.035, w * 0.93],
+      ];
+      if (y <= pts[0][0]) return pts[0][1];
+      for (let i = 0; i < pts.length - 1; i++) {
+        const [y0, x0] = pts[i];
+        const [y1, x1] = pts[i + 1];
+        if (y <= y1) return lerp(x0, x1, (y - y0) / Math.max(1e-4, y1 - y0));
+      }
+      return pts[pts.length - 1][1];
+    };
+    // White door panels with POLICE lettering, conforming to the body side.
+    const decal = new THREE.MeshStandardMaterial({ map: policeDoorTex(), roughness: 0.35, metalness: 0.1, side: THREE.DoubleSide });
+    const ds0 = cr + 0.12;
+    const ds1 = cf - 0.04;
+    const NS = 14;
+    const NY = 6;
+    for (const side of [-1, 1]) {
+      const pos: number[] = [];
+      const uv: number[] = [];
+      const idx: number[] = [];
+      for (let i = 0; i <= NS; i++) {
+        const s = lerp(ds0, ds1, i / NS);
+        const top = beltline(p, s) - 0.05;
+        const bot = underside(p, s) + 0.1;
+        for (let j = 0; j <= NY; j++) {
+          const y = lerp(bot, top, j / NY);
+          pos.push(side * (sideX(s, y) + 0.007), y, s);
+          // Text reads front-to-back on the left side, back-to-front on the right.
+          uv.push(side > 0 ? 1 - i / NS : i / NS, j / NY);
+        }
+      }
+      for (let i = 0; i < NS; i++) {
+        for (let j = 0; j < NY; j++) {
+          const a = i * (NY + 1) + j;
+          const b2 = a + NY + 1;
+          idx.push(a, b2, b2 + 1, a, b2 + 1, a + 1);
+        }
+      }
+      const g = new THREE.BufferGeometry();
+      g.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
+      g.setAttribute("uv", new THREE.Float32BufferAttribute(uv, 2));
+      g.setIndex(idx);
+      g.computeVertexNormals();
+      body.add(new THREE.Mesh(g, decal));
+    }
+    // White roof.
+    const roofSt = stationsFor(rr - 0.06, rf + 0.06, 12);
+    const roofSec = (s: number): [number, number][] => {
+      const roof = Math.max(roofline(p, s), beltline(p, s) + 0.005);
+      const wt = p.hw * b.tumblehome;
+      return [
+        [wt * 0.9, roof - 0.004],
+        [wt * 0.45, roof + 0.012],
+        [0, roof + 0.017],
+        [-wt * 0.45, roof + 0.012],
+        [-wt * 0.9, roof - 0.004],
+      ];
+    };
+    body.add(new THREE.Mesh(loft(roofSt, roofSec, () => 0, false), white));
+    // Light bar across the roof: dark housing, red (left) and blue (right) lenses.
+    const sb = (rr + rf) / 2 - 0.05;
+    const yb = roofline(p, sb) + 0.02;
+    const wt = p.hw * b.tumblehome;
+    const housing = new THREE.Mesh(new THREE.BoxGeometry(wt * 1.62, 0.06, 0.3), m.trim);
+    housing.position.set(0, yb + 0.03, sb);
+    body.add(housing);
+    sirenRed = new THREE.MeshBasicMaterial({ color: 0xff2a2a });
+    sirenBlue = new THREE.MeshBasicMaterial({ color: 0x2a6bff });
+    for (const side of [-1, 1]) {
+      const lens = new THREE.Mesh(new THREE.BoxGeometry(wt * 0.7, 0.085, 0.24), side > 0 ? sirenRed : sirenBlue);
+      lens.position.set(side * wt * 0.42, yb + 0.1, sb);
+      body.add(lens);
+    }
+    // Push bar in front of the grille.
+    const pbz = nose + 0.09;
+    for (const side of [-1, 1]) {
+      const post = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.42, 0.06), m.trim);
+      post.position.set(side * 0.34, b.clearance + 0.36, pbz);
+      body.add(post);
+    }
+    for (const y of [b.clearance + 0.22, b.clearance + 0.52]) {
+      const bar = new THREE.Mesh(new THREE.BoxGeometry(0.82, 0.05, 0.05), m.trim);
+      bar.position.set(0, y, pbz + 0.01);
+      body.add(bar);
+    }
+  }
+
   // -- wheels --
   const wheels: CarVisual["wheels"] = [];
   const r = b.wheelRadius;
@@ -788,6 +941,8 @@ export function buildCar(def: CarDef, color: string): CarVisual {
     exhausts,
     rearContacts,
     headlightAnchor,
+    sirenRed,
+    sirenBlue,
     dispose() {
       root.traverse((o) => {
         if (o instanceof THREE.Mesh) {

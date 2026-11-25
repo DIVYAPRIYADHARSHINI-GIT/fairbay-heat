@@ -217,7 +217,8 @@ export class TrafficView {
     const headDay = new THREE.Color(0.75, 0.75, 0.72);
     const headNight = new THREE.Color(1.0, 0.97, 0.88);
     for (const car of cars) {
-      const k = this.kinds.get(car.model.kind)!;
+      const k = this.kinds.get(car.model.kind);
+      if (!k) continue; // police patrols are drawn by the police renderer
       const i = counts.get(car.model.kind) ?? 0;
       if (i >= MAX_PER_KIND) continue;
       counts.set(car.model.kind, i + 1);

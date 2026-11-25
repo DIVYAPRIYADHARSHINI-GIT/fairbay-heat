@@ -32,8 +32,34 @@ export function el<K extends keyof HTMLElementTagNameMap>(tag: K, cls = "", text
   return e;
 }
 
+/** What the HUD shows about the police. */
+export interface PursuitHud {
+  state: "calm" | "pursuit" | "cooldown" | "busted" | "escaped";
+  heat: number;
+  bounty: number;
+  /** 0..1 how close you are to slipping out of sight (pursuit). */
+  evade: number;
+  cooldown: number;
+  bust: number;
+  units: number;
+  /** Police positions for the minimap (units, roadblock cars and patrols). */
+  blips: { x: number; z: number; kind: "unit" | "block" | "patrol" }[];
+  /** Red / blue phase of the light bars (minimap blips flash with them). */
+  red: boolean;
+}
+
 export class Hud {
   readonly root: HTMLDivElement;
+  private heatEl: HTMLDivElement;
+  private heatStars: HTMLSpanElement[] = [];
+  private heatLabel: HTMLDivElement;
+  private heatBounty: HTMLDivElement;
+  private heatBar: HTMLDivElement;
+  private heatBarFill: HTMLElement;
+  private bustEl: HTMLDivElement;
+  private bustFill: HTMLElement;
+  private result: HTMLDivElement;
+  private pursuit: PursuitHud | null = null;
   private speedo: HTMLCanvasElement;
   private sctx: CanvasRenderingContext2D;
   private mini: HTMLCanvasElement;
@@ -83,6 +109,32 @@ export class Hud {
     this.root.appendChild(this.fps);
     this.flash = el("div", "flash");
     parent.appendChild(this.flash);
+
+    // Pursuit: heat stars + bounty, evade / cooldown bar, busted meter, result.
+    this.heatEl = el("div", "heat");
+    this.heatEl.dataset.state = "calm";
+    const stars = el("div", "heat-stars");
+    for (let i = 0; i < 5; i++) {
+      const st = el("span", "star", "★");
+      this.heatStars.push(st);
+      stars.appendChild(st);
+    }
+    this.heatLabel = el("div", "heat-label");
+    this.heatBounty = el("div", "heat-bounty");
+    this.heatBar = el("div", "heat-bar");
+    this.heatBarFill = el("i");
+    this.heatBar.appendChild(this.heatBarFill);
+    this.heatEl.append(stars, this.heatLabel, this.heatBar, this.heatBounty);
+    this.root.appendChild(this.heatEl);
+    this.bustEl = el("div", "bust");
+    this.bustEl.appendChild(el("span", "bust-label", "BUSTED"));
+    const bb = el("div", "bust-bar");
+    this.bustFill = el("i");
+    bb.appendChild(this.bustFill);
+    this.bustEl.appendChild(bb);
+    this.root.appendChild(this.bustEl);
+    this.result = el("div", "result");
+    this.root.appendChild(this.result);
 
     this.mapImg = this.renderMap();
   }
@@ -237,6 +289,40 @@ export class Hud {
     this.fps.style.display = s.fps === null ? "none" : "block";
   }
 
+  /** Heat meter, evade / cooldown bar, busted meter and police blips. */
+  setPursuit(p: PursuitHud): void {
+    this.pursuit = p;
+    const e = this.heatEl;
+    e.dataset.state = p.state;
+    e.classList.toggle("show", p.state !== "calm");
+    this.heatStars.forEach((st, i) => st.classList.toggle("on", i < p.heat));
+    const fmt = (n: number) => Math.round(n).toLocaleString("en-US");
+    if (p.state === "pursuit") {
+      this.heatLabel.textContent = p.evade > 0.02 ? "LOSING THEM" : `PURSUIT · ${p.units} ${p.units === 1 ? "UNIT" : "UNITS"}`;
+      this.heatBarFill.style.width = `${Math.round(p.evade * 100)}%`;
+    } else if (p.state === "cooldown") {
+      this.heatLabel.textContent = "COOLDOWN · STAY HIDDEN";
+      this.heatBarFill.style.width = `${Math.round(p.cooldown * 100)}%`;
+    } else {
+      this.heatLabel.textContent = p.state === "busted" ? "BUSTED" : p.state === "escaped" ? "ESCAPED" : "";
+      this.heatBarFill.style.width = p.state === "escaped" ? "100%" : "0%";
+    }
+    this.heatBounty.textContent = p.state === "calm" ? "" : `BOUNTY ${fmt(p.bounty)}`;
+    this.bustEl.classList.toggle("show", p.state === "pursuit" && p.bust > 0.02);
+    this.bustFill.style.width = `${Math.round(p.bust * 100)}%`;
+  }
+
+  /** Big BUSTED / ESCAPED result card (null hides it). */
+  setResult(kind: "busted" | "escaped" | null, title = "", sub = ""): void {
+    if (!kind) {
+      this.result.classList.remove("show");
+      return;
+    }
+    this.result.dataset.kind = kind;
+    this.result.replaceChildren(el("div", "r-title", title), el("div", "r-sub", sub));
+    this.result.classList.add("show");
+  }
+
   private drawSpeedo(s: { speedKmh: number; rpm: number; redline: number; gear: number; nitro: number; nitroActive: boolean }): void {
     const g = this.sctx;
     const d = this.dpr;
@@ -346,7 +432,30 @@ export class Hud {
       g.lineWidth = 2 / k;
       g.stroke();
     }
+    // Police blips: flashing red / blue (roadblocks steady red, patrols dim blue).
+    const pur = this.pursuit;
+    if (pur) {
+      for (const b of pur.blips) {
+        const [x, y] = Hud.toMap(b.x, b.z);
+        const col = b.kind === "block" ? "#ff3b3b" : b.kind === "patrol" ? "#6f8fd8" : pur.red ? "#ff3b3b" : "#3b7bff";
+        g.fillStyle = col;
+        g.beginPath();
+        g.arc(x - px, y - py, (b.kind === "patrol" ? 5 : 7) / k, 0, Math.PI * 2);
+        g.fill();
+        g.strokeStyle = "#fff";
+        g.lineWidth = 1.5 / k;
+        g.stroke();
+      }
+    }
     g.restore();
+    // Pursuit: red rim pulse on the minimap edge.
+    if (pur && pur.state === "pursuit") {
+      g.strokeStyle = pur.red ? "rgba(255,50,50,0.85)" : "rgba(60,120,255,0.85)";
+      g.lineWidth = 6;
+      g.beginPath();
+      g.arc(R, R, R - 4, 0, Math.PI * 2);
+      g.stroke();
+    }
     // Player arrow (always points up).
     g.save();
     g.translate(R, R + 30);

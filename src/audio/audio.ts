@@ -68,6 +68,27 @@ export interface TrafficSound {
   speed: number;
 }
 
+export interface SirenSound {
+  id: number;
+  /** Position relative to the listener: right (m), forward (m). */
+  right: number;
+  fwd: number;
+  /** Closing speed towards the listener, m/s (positive = approaching). */
+  closing: number;
+  /** 0 = wail (slow sweep), 1 = yelp (fast sweep, used up close). */
+  yelp: boolean;
+}
+
+interface SirenVoice {
+  osc: OscillatorNode;
+  osc2: OscillatorNode;
+  filter: BiquadFilterNode;
+  gain: GainNode;
+  pan: StereoPannerNode;
+  id: number;
+  phase: number;
+}
+
 export class GameAudio {
   ctx: AudioContext | null = null;
   ready = false;
@@ -92,6 +113,10 @@ export class GameAudio {
   private windFilter!: BiquadFilterNode;
   private noiseBuf!: AudioBuffer;
   private voices: TrafficVoice[] = [];
+  private sirens: SirenVoice[] = [];
+  /** Sirens currently audible (tests). */
+  sirenCount = 0;
+  private lastSirenT = 0;
   private meter: AnalyserNode | null = null;
   private meterBuf = new Float32Array(2048);
   private pendingSpec: { id: string; spec: EngineSynthSpec } | null = null;
@@ -281,6 +306,7 @@ export class GameAudio {
       for (const g of [this.engineGain, this.squealGain, this.windGain, this.roadGain, this.gravelGain]) g.gain.setTargetAtTime(0, t, 0.08);
       this.sendEngine({ rpm: s.rpm, load: 0, limiter: false, gain: 0 });
       for (const v of this.voices) v.gain.gain.setTargetAtTime(0, t, 0.08);
+      for (const v of this.sirens) v.gain.gain.setTargetAtTime(0, t, 0.08);
       return;
     }
     this.sendEngine({ rpm: s.rpm, load: s.load, limiter: s.limiter, gain: 1 });
@@ -355,6 +381,95 @@ export class GameAudio {
     const v: TrafficVoice = { osc, osc2, filter, gain, pan, id: -1 };
     this.voices.push(v);
     return v;
+  }
+
+  /**
+   * Police sirens: up to 3 voices for the nearest units. Each is a classic
+   * electronic siren - a square + saw pair swept between ~650 and ~1500 Hz
+   * (slow "wail", or fast "yelp" up close), through a horn-like band-pass,
+   * with Doppler shift, distance falloff and stereo panning.
+   */
+  updateSirens(list: SirenSound[]): void {
+    const ctx = this.ctx;
+    if (!ctx) return;
+    const t = ctx.currentTime;
+    const dt = Math.min(0.1, Math.max(0, t - this.lastSirenT));
+    this.lastSirenT = t;
+    const keep = new Set(list.map((c) => c.id));
+    this.sirenCount = list.length;
+    for (const v of this.sirens) if (!keep.has(v.id)) v.gain.gain.setTargetAtTime(0, t, 0.25);
+    for (const c of list) {
+      let v = this.sirens.find((x) => x.id === c.id);
+      if (!v) {
+        v = this.sirens.find((x) => !keep.has(x.id));
+        if (!v && this.sirens.length < 3) v = this.makeSiren();
+        if (!v) continue;
+        v.id = c.id;
+      }
+      // Sweep: wail ~ 5 s period, yelp ~ 0.3 s.
+      v.phase = (v.phase + dt / (c.yelp ? 0.32 : 4.6)) % 1;
+      const sweep = c.yelp ? 0.5 - 0.5 * Math.cos(v.phase * Math.PI * 2) : v.phase < 0.55 ? v.phase / 0.55 : 1 - (v.phase - 0.55) / 0.45;
+      const base = 650 + sweep * 850;
+      const doppler = 343 / (343 - clamp(c.closing, -70, 70));
+      const f = base * doppler;
+      v.osc.frequency.setTargetAtTime(f, t, 0.012);
+      v.osc2.frequency.setTargetAtTime(f * 1.005, t, 0.012);
+      v.filter.frequency.setTargetAtTime(Math.min(4000, f * 1.6), t, 0.03);
+      const d = Math.hypot(c.right, c.fwd);
+      const att = clamp(1 / (1 + (d / 25) ** 1.5), 0, 1);
+      v.gain.gain.setTargetAtTime(att * 0.07, t, 0.08);
+      v.pan.pan.setTargetAtTime(clamp(c.right / Math.max(5, d), -0.9, 0.9), t, 0.08);
+    }
+  }
+
+  private makeSiren(): SirenVoice {
+    const ctx = this.ctx!;
+    const osc = ctx.createOscillator();
+    osc.type = "square";
+    const osc2 = ctx.createOscillator();
+    osc2.type = "sawtooth";
+    const filter = ctx.createBiquadFilter();
+    filter.type = "bandpass";
+    filter.Q.value = 1.4;
+    const gain = ctx.createGain();
+    gain.gain.value = 0;
+    const pan = ctx.createStereoPanner();
+    const mix = ctx.createGain();
+    mix.gain.value = 0.5;
+    osc.connect(filter);
+    osc2.connect(mix).connect(filter);
+    filter.connect(gain).connect(pan).connect(this.master);
+    gain.connect(this.reverbSend);
+    osc.start();
+    osc2.start();
+    const v: SirenVoice = { osc, osc2, filter, gain, pan, id: -1, phase: Math.random() };
+    this.sirens.push(v);
+    return v;
+  }
+
+  /** Short alert sting (chase start / heat up / busted / escaped). */
+  sting(kind: "alert" | "heat" | "busted" | "escaped"): void {
+    const ctx = this.ctx;
+    if (!ctx) return;
+    const t = ctx.currentTime;
+    const notes: Record<typeof kind, [number, number][]> = {
+      alert: [[660, 0], [880, 0.12]],
+      heat: [[520, 0], [690, 0.1], [920, 0.2]],
+      busted: [[392, 0], [330, 0.18], [262, 0.36]],
+      escaped: [[523, 0], [659, 0.12], [784, 0.24], [1047, 0.36]],
+    };
+    for (const [hz, at] of notes[kind]) {
+      const o = ctx.createOscillator();
+      o.type = kind === "busted" ? "sawtooth" : "triangle";
+      o.frequency.value = hz;
+      const g = ctx.createGain();
+      g.gain.setValueAtTime(0, t + at);
+      g.gain.linearRampToValueAtTime(0.09, t + at + 0.015);
+      g.gain.exponentialRampToValueAtTime(0.001, t + at + 0.32);
+      o.connect(g).connect(this.master);
+      o.start(t + at);
+      o.stop(t + at + 0.36);
+    }
   }
 
   /** Two-tone car horn from a position relative to the listener. */

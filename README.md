@@ -2,7 +2,8 @@
 
 **An open-world 3D street racer in the browser, built without a game engine.**
 Inspired by *Need for Speed: Most Wanted* (2013): drive freely around a city,
-find parked cars and jack them, drift to fill your nitro, hit jumps.
+find parked cars and jack them, drift to fill your nitro, hit jumps, and
+outrun the Fairbay PD.
 
 ![Drifting downtown](docs/screenshots/04-drift.png)
 
@@ -88,6 +89,19 @@ around the player on the lane graph (`src/game/traffic.ts`):
 - They brake for you if you stop in their lane, **honk**, and get **knocked away** with hazard lights when you ram them.
 - Like real cars they **turn about their rear axle**: the rear wheels follow the lane while the nose swings into the turn (no spinning about the middle).
 
+## Stage 3: police chases
+
+The Fairbay PD (`src/game/police.ts`, `src/game/heat.ts`):
+
+- **Patrol cars** drive in traffic like everyone else (lanes, lights, car following). Each one watches a 140 m, 150-degree cone ahead, and buildings block its view.
+- **Offences only count if a cop sees them:** speeding (over 95 km/h in town, 140 km/h on highways), hitting traffic, ramming a police car, smashing lamp posts. The patrol that saw it turns into a pursuit unit on the spot, siren on.
+- **Heat levels 1-5** rise with your bounty and with how long the chase lasts. More heat means more units (2 up to 6), faster **Enforcer** cars alongside the **Interceptors**, and from heat 3 **roadblocks**: police cars parked at an angle across the road ahead of you, out of sight, with one gap about 3 m wide at a kerb.
+- **Units are real physics cars** with the same arcade physics as yours. They follow the roads to you (A* route over the road network, braking for every corner) and use lead pursuit when they can see you. At heat 1 they tail you; from heat 2 they get alongside and **PIT** the rear quarter. They steer around traffic, crash through it if they have to, back out when stuck, and are taken out if you ram them hard enough (a takedown adds bounty).
+- **Escape:** break line of sight with every unit. After 5 s the **cooldown** starts: hide until the bar fills (longer at high heat, faster the further away you are). Any unit or patrol that spots you restarts the pursuit. Escaping banks the bounty.
+- **Busted:** stop with a unit alongside, or get boxed in by two, and the busted meter fills in about 3 s (it drains when you get moving). You lose the chase's bounty.
+- **Presentation:** black-and-white livery with POLICE doors, a roof light bar flashing red/blue (per car, instanced: the whole police force costs a fixed number of draw calls), siren glow, red/blue light splashing on the street at night, a synthesised **wail/yelp siren** with Doppler shift and panning, a heat meter with stars, the bounty and an evade/cooldown bar, a busted meter, flashing police blips on the minimap, and BUSTED / ESCAPED screens.
+- **Settings > Police chases** turns them off for free roaming.
+
 ## Sound
 
 The engine is a **physically-modelled synthesiser** (`src/audio/engineSynth.ts`)
@@ -112,15 +126,16 @@ plain TypeScript in this repo:
 | `src/game/collision.ts` | Circle-vs-box / circle-vs-circle tests with a spatial hash |
 | `src/game/mapdata.ts`, `roads.ts`, `world.ts` | The hand-made map, road network (curves, junctions, elevation, bridges, lane graph, signals) and the world (terrain, water, buildings along curved roads, props, ground/surface queries) |
 | `src/game/traffic.ts` | Traffic AI (IDM car-following, signals, give-way, junction reservation, collisions) |
+| `src/game/heat.ts`, `police.ts` | Wanted system (offences, heat levels, cooldown, busted) and police AI (patrols, road-following pursuit, PIT, roadblocks, line of sight) |
 | `src/game/jack.ts`, `save.ts`, `scoring.ts` | Jack spots, defensive localStorage save, drift and jump scoring |
 | `src/render/carModel.ts` | Cars generated from body dimensions: lofted body with cut wheel arches, greenhouse, lights, spoilers, wheels |
-| `src/render/worldMesh.ts`, `trafficView.ts` | Road ribbons with markings, junctions, bridges, terrain, water, buildings merged into chunks, instanced props and traffic |
+| `src/render/worldMesh.ts`, `trafficView.ts`, `policeView.ts` | Road ribbons with markings, junctions, bridges, terrain, water, buildings merged into chunks, instanced props, traffic and police cars |
 | `src/render/textures.ts` | Every texture is drawn on a canvas at load time. No image files. |
 | `src/render/environment.ts`, `effects.ts`, `cameraRig.ts` | Day/night, tyre smoke, skid marks, sparks, nitro flames, speed lines, chase/bumper cameras |
-| `src/audio/engineSynth.ts`, `audio.ts` | Physically-modelled engine (AudioWorklet), tyres, wind, traffic, horns, crashes: all synthesised. No audio files. |
+| `src/audio/engineSynth.ts`, `audio.ts` | Physically-modelled engine (AudioWorklet), tyres, wind, traffic, horns, sirens, crashes: all synthesised. No audio files. |
 | `src/core/input.ts` | Held-key + pressed-edge keyboard input by physical key code |
 
-The whole game is a 0.7 MB static site (185 KB gzipped) with no assets to download.
+The whole game is a 0.86 MB static site (237 KB gzipped) with no assets to download.
 
 ## Tests
 
@@ -128,13 +143,14 @@ The whole game is a 0.7 MB static site (185 KB gzipped) with no assets to downlo
 npm test     # typecheck + unit + e2e
 ```
 
-- **91 unit tests** (Vitest) covering:
+- **114 unit tests** (Vitest) covering:
   - **Physics:** 0-100 km/h and top speed for each car, braking, steering (per-car feel, and the car turning about its rear axle - the instantaneous turn centre is measured on the rear-axle line), drifting, timestep independence, walls, jumps.
   - **Map:** every lane reachable both ways, grades within 10% (15% on the pass), no step in the surface anywhere along any lane, no building on a road or in water or overlapping another, lanes clear of obstacles, bridges over the river, signal phases never both green.
   - **Traffic:** IDM behaviour, plus a 5-minute headless soak with 110 cars: **zero** cars passing through each other, **zero** red-light runs, no gridlock. Rear axles stay on the lane path through turns. Also braking for the player, ramming and determinism.
   - **Engine sound**, rendered offline and analysed: the firing frequency is the dominant tone, pitch follows rpm, the V8 has 3x more burble than the V12/W16, full throttle is louder than overrun, the rev limiter chops the sound, the turbo spools up, gear changes make no hiss, crackles on lift-off, and different cars sound different.
+  - **Police and heat:** offences only count when seen, rate limits, heat rising with bounty and time, cooldown and escape, busted meter and boxing in. Headless chases with a scripted getaway driver: units follow the roads to a stopped player and bust them without ramming them away, a fast car escapes, a slow one is caught, heat 1 tails while heat 3 PITs, roadblocks leave a gap a car wide, patrols that see you speeding join the chase, buildings block vision, traffic brakes for police cars, and the player never ends up inside a police car in a chase through traffic.
   - Save files, jack spots and scoring.
-- **87 end-to-end checks** (`tests/e2e.mjs`) run the real build in Chrome with **real key presses**. They cover menus, driving, braking and reversing, drift, nitro, crashing into a building, a ramp jump and jacking a car. They check that the engine runs on the audio thread, that the engine model matches the car, that throttle is louder than idle, that the revs drop on each upshift and that M mutes. For traffic they check it populates and moves, includes several vehicle types, stays on the roads, and that ramming a car knocks it out. They also drive up the mountain, cross the bridge, drive the viaduct and the frontage road under it, test the camera/map/pause/time/garage keys, the steering-sensitivity setting, persistence across reload and night mode (headlights must not white out the view behind a car or facing a wall), require the display's full frame rate, and fail on any console error.
+- **103 end-to-end checks** (`tests/e2e.mjs`) run the real build in Chrome with **real key presses**. They cover menus, driving, braking and reversing, drift, nitro, crashing into a building, a ramp jump and jacking a car. They check that the engine runs on the audio thread, that the engine model matches the car, that throttle is louder than idle, that the revs drop on each upshift and that M mutes. For traffic they check it populates and moves, includes several vehicle types, stays on the roads, and that ramming a car knocks it out. They also drive up the mountain, cross the bridge, drive the viaduct and the frontage road under it, test the camera/map/pause/time/garage keys, the steering-sensitivity setting, a full police chase (speeding past a patrol starts it, the HUD heat meter and alert, getting busted, a heat-3 roadblock ahead of you, sirens, minimap blips, cooldown and escape), the police on/off setting, persistence across reload and night mode (headlights must not white out the view behind a car or facing a wall), require the display's full frame rate, and fail on any console error.
 
 Measured: **60 fps at 1440 x 900** with traffic (Apple M1, Chrome, High quality).
 
@@ -142,5 +158,5 @@ Measured: **60 fps at 1440 x 900** with traffic (Apple M1, Chrome, High quality)
 
 1. ✅ **Stage 1**: driving physics, 6 cars, jack spots, garage, day/night, HUD
 2. ✅ **Stage 2**: hand-made map, traffic AI, realistic engine sound
-3. Stage 3: police chases, heat levels, roadblocks, escapes
+3. ✅ **Stage 3**: police chases, heat levels, roadblocks, escapes
 4. Stage 4: races against AI, speed cameras, speed-trap events, more cars

@@ -69,7 +69,7 @@ export function wheelbaseOf(m: { kind: string; length: number }): number {
   return f - r;
 }
 
-export type TrafficKind = "sedan" | "hatch" | "suv" | "taxi" | "van" | "pickup" | "bus";
+export type TrafficKind = "sedan" | "hatch" | "suv" | "taxi" | "van" | "pickup" | "bus" | "police";
 
 export interface TrafficModel {
   kind: TrafficKind;
@@ -89,6 +89,14 @@ export const TRAFFIC_MODELS: TrafficModel[] = [
   { kind: "pickup", length: 5.4, width: 2.0, height: 1.85, colors: ["#8b1e1e", "#2e4a2e", "#c4c4c4", "#1c1c1c"], weight: 1.3 },
   { kind: "bus", length: 11.5, width: 2.55, height: 3.1, colors: ["#d8392b"], weight: 0.4 },
 ];
+
+/**
+ * A police patrol car. Patrols drive in traffic (lanes, signals, car
+ * following) until they witness an offence; the police module then takes
+ * the car over and chases you. Never picked at random (not in TRAFFIC_MODELS);
+ * drawn by the police renderer, not the traffic one.
+ */
+export const POLICE_MODEL: TrafficModel = { kind: "police", length: 5.0, width: 1.92, height: 1.46, colors: ["#101318"], weight: 0 };
 
 export interface TrafficCar {
   id: number;
@@ -161,6 +169,11 @@ export class Traffic {
   private colliderPool: CircleCollider[] = [];
   private sibCache = new Map<number, LaneSeg[]>();
   enabled = true;
+  /**
+   * Other cars traffic must not drive into, like the player's: police units
+   * and roadblocks (set every frame by the police module).
+   */
+  obstacles: PlayerState[] = [];
 
   constructor(
     readonly net: RoadNetwork,
@@ -184,8 +197,8 @@ export class Traffic {
     return TRAFFIC_MODELS[0];
   }
 
-  /** Tries to place one car on a lane near the focus point. */
-  spawnNear(fx: number, fz: number, fHeading: number | null, minR = SPAWN_MIN, maxR = SPAWN_MAX): TrafficCar | null {
+  /** Tries to place one car (a random model, or `model`) on a lane near the focus point. */
+  spawnNear(fx: number, fz: number, fHeading: number | null, minR = SPAWN_MIN, maxR = SPAWN_MAX, model?: TrafficModel): TrafficCar | null {
     const lanes = this.net.lanes;
     for (let attempt = 0; attempt < 24; attempt++) {
       const seg = lanes[Math.floor(this.rng() * lanes.length)];
@@ -203,7 +216,7 @@ export class Traffic {
         if (Math.cos(ang) > 0.7) continue;
       }
       if (!this.gapFree(seg, s, 14)) continue;
-      return this.add(seg, s);
+      return this.add(seg, s, model ?? this.pickModel());
     }
     return null;
   }
@@ -537,7 +550,11 @@ export class Traffic {
         const need = (car.v * car.v) / (2 * Math.max(0.5, jg));
         if (jg < 25 && need > IDM.b) acc = Math.min(acc, -Math.min(IDM.bMax, need * 1.1));
       }
-      const pg = this.playerGap(car, player);
+      let pg = this.playerGap(car, player);
+      for (const o of this.obstacles) {
+        const og = this.playerGap(car, o);
+        if (og.gap < pg.gap) pg = og;
+      }
       if (pg.gap < Infinity) {
         acc = Math.min(acc, idmAccel(car.v, v0, pg.gap, car.v - pg.v));
         if (pg.gap < 9 && car.v < 3 && car.hornT === 0 && this.rng() < 0.02) {

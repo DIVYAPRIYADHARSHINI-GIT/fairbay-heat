@@ -24,11 +24,18 @@ export interface SaveData {
   showFps: boolean;
   /** Steering sensitivity multiplier (0.6 - 1.6). */
   steering: number;
+  /** Police chases on (off = free roam). */
+  police: boolean;
   /** Bests. */
   topSpeedKmh: number;
   longestJump: number;
   bestDrift: number;
   distanceKm: number;
+  /** Police record: banked bounty, escapes, busts, best single-chase bounty. */
+  bounty: number;
+  escapes: number;
+  busts: number;
+  bestBounty: number;
   /** Last position, so the player resumes where they parked. */
   pos: { x: number; z: number; heading: number } | null;
 }
@@ -49,10 +56,15 @@ export function defaults(): SaveData {
     camera: 0,
     showFps: false,
     steering: 1,
+    police: true,
     topSpeedKmh: 0,
     longestJump: 0,
     bestDrift: 0,
     distanceKm: 0,
+    bounty: 0,
+    escapes: 0,
+    busts: 0,
+    bestBounty: 0,
     pos: null,
   };
 }
@@ -97,10 +109,15 @@ export function parseSave(raw: string | null): SaveData {
     camera: Math.round(num(o.camera, 0, 0, 2)),
     showFps: typeof o.showFps === "boolean" ? o.showFps : d.showFps,
     steering: num(o.steering, d.steering, 0.6, 1.6),
+    police: typeof o.police === "boolean" ? o.police : d.police,
     topSpeedKmh: num(o.topSpeedKmh, 0, 0, 1000),
     longestJump: num(o.longestJump, 0, 0, 1000),
     bestDrift: num(o.bestDrift, 0, 0, 1e7),
     distanceKm: num(o.distanceKm, 0, 0, 1e6),
+    bounty: num(o.bounty, 0, 0, 1e12),
+    escapes: Math.round(num(o.escapes, 0, 0, 1e6)),
+    busts: Math.round(num(o.busts, 0, 0, 1e6)),
+    bestBounty: num(o.bestBounty, 0, 0, 1e12),
     pos,
   };
 }

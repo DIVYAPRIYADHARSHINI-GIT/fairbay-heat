@@ -15,7 +15,9 @@ import { Input } from "../core/input";
 import { clamp, damp, lerp, wrapAngle } from "../core/math";
 import { CARS, carById, ratings, type CarDef } from "./cars";
 import { World, DISTRICT_NAMES, type District } from "./world";
-import { Traffic, TRAFFIC_MODELS } from "./traffic";
+import { Traffic, TRAFFIC_MODELS, POLICE_MODEL } from "./traffic";
+import { Police, POLICE_CARS, type PlayerView } from "./police";
+import { HeatSystem, type HeatEvent, type Offence } from "./heat";
 import { CarPhysics, NO_CONTROLS, type Controls } from "./physics";
 import { JACK_SPOTS, JACK_SPOT_DEFS, jackable, setJackSpots, type JackSpot } from "./jack";
 import { DriftScore, JumpTracker, MIN_JUMP } from "./scoring";
@@ -24,6 +26,7 @@ import { collide, type CircleCollider, type Collider } from "./collision";
 import { buildCar, poseCar, type CarVisual } from "../render/carModel";
 import { buildWorldView, type WorldView } from "../render/worldMesh";
 import { TrafficView } from "../render/trafficView";
+import { PoliceView } from "../render/policeView";
 import { Environment } from "../render/environment";
 import { Effects } from "../render/effects";
 import { CameraRig, CAMERA_MODES } from "../render/cameraRig";
@@ -68,6 +71,8 @@ export class Game {
   readonly camera = new THREE.PerspectiveCamera(62, 1, 0.3, 9000);
   readonly city: World;
   readonly traffic: Traffic;
+  readonly police: Police;
+  readonly heat = new HeatSystem();
   readonly input: Input;
   readonly audio = new GameAudio();
   readonly rig: CameraRig;
@@ -77,6 +82,7 @@ export class Game {
   env!: Environment;
   cityView!: WorldView;
   trafficView!: TrafficView;
+  policeView!: PoliceView;
   effects!: Effects;
   parked: ParkedCar[] = [];
   /** Jack spot whose car the player is currently driving (hidden from the street). */
@@ -117,8 +123,13 @@ export class Game {
   beamDim = 1;
   private beamScratch: Collider[] = [];
   trafficHits = 0;
+  /** Police log for the tests: every heat event so far. */
+  readonly heatLog: HeatEvent[] = [];
+  private resultTimer = 0;
   /** Exposed for tests. */
   readonly trafficModels = TRAFFIC_MODELS;
+  readonly policeDefs = POLICE_CARS;
+  readonly policeModel = POLICE_MODEL;
   readonly errors: string[] = [];
 
   constructor(private container: HTMLElement) {
@@ -137,6 +148,11 @@ export class Game {
     this.city = new World({ jackSpots: JACK_SPOT_DEFS });
     setJackSpots(this.city.jackSpots);
     this.traffic = new Traffic(this.city.net, 77, this.city.ground);
+    this.police = new Police(this.city.net, this.city.world, this.city.colliders, this.traffic);
+    this.police.enabled = this.save.police;
+    this.heat.totalBounty = this.save.bounty;
+    this.heat.escapes = this.save.escapes;
+    this.heat.busts = this.save.busts;
     this.input = new Input(window);
     this.rig = new CameraRig(this.camera);
     this.rig.mode = this.save.camera;
@@ -162,6 +178,10 @@ export class Game {
     await tick();
     this.trafficView = new TrafficView();
     this.scene.add(this.trafficView.group);
+    progress(0.7, "Calling the Fairbay PD");
+    await tick();
+    this.policeView = new PoliceView();
+    this.scene.add(this.policeView.group);
     this.effects = new Effects();
     this.scene.add(this.effects.group, this.effects.speedLines);
     for (const spot of JACK_SPOTS) this.addParked(spot);
@@ -398,6 +418,13 @@ export class Game {
           },
           hint: "How quickly the steering responds to A/D (each car also has its own feel)",
         },
+        {
+          id: "police",
+          label: "Police chases",
+          value: () => (this.save.police ? "On" : "Off (free roam)"),
+          adjust: () => this.setPolice(!this.save.police),
+          hint: "Turn the police off to cruise the city without being chased",
+        },
         { id: "fps", label: "FPS counter", value: () => (this.save.showFps ? "On" : "Off"), adjust: () => (this.save.showFps = !this.save.showFps) },
         {
           id: "wipe",
@@ -465,7 +492,7 @@ export class Game {
       el(
         "p",
         "sub",
-        "Drift (Space + steer) to fill your nitro. Find parked cars around Fairbay (orange dots on the map) and press E next to one to take it.",
+        "Drift (Space + steer) to fill your nitro. Find parked cars around Fairbay (orange dots on the map) and press E next to one to take it. Police: speeding past a patrol (over 95 km/h in town, 140 on highways), hitting cars or smashing lamp posts in sight of a cop starts a chase. Break line of sight and stay hidden until the cooldown bar fills to escape; stop with a cop alongside and you are busted. Heat 3+ brings roadblocks - look for the gap at the kerb. Police can be switched off in Settings.",
       ),
     );
     const hf = el("div", "menu-foot");
@@ -682,6 +709,8 @@ export class Game {
 
   private controls(): Controls {
     if (this.state !== "drive") return NO_CONTROLS;
+    // Busted: the car is held while the cops make the arrest.
+    if (this.heat.state === "busted") return { ...NO_CONTROLS, handbrake: true };
     const i = this.input;
     return {
       throttle: i.isDown("accelerate") ? 1 : 0,
@@ -731,6 +760,16 @@ export class Game {
     this.effects.skids.clear();
   }
 
+  /** Police chases on / off (Settings). Turning them off ends any chase. */
+  setPolice(on: boolean): void {
+    this.save.police = on;
+    this.police.setEnabled(on);
+    if (!on) {
+      this.heat.reset();
+      this.hud?.setResult(null);
+    }
+  }
+
   private setMuted(m: boolean): void {
     this.save.muted = m;
     this.audio.setMuted(m);
@@ -757,6 +796,11 @@ export class Game {
     Object.assign(this.save, defaults(), keep);
     if (this.hiddenSpot) this.setParkedVisible(this.hiddenSpot, true);
     this.hiddenSpot = null;
+    this.heat.reset();
+    this.heat.totalBounty = 0;
+    this.heat.escapes = 0;
+    this.heat.busts = 0;
+    this.police.standDown();
     this.spawnPlayer("mustanger", 0);
     const sp = this.city.spawn;
     this.car.place(sp.x, sp.z, sp.heading, this.city.ground(sp.x, sp.z));
@@ -808,6 +852,7 @@ export class Game {
         this.snapPrev();
         const ev = this.car.step(STEP, c, this.city.world);
         this.applyTrafficHits(this.traffic.collide(this.playerState()));
+        this.applyPoliceHits(this.police.collide(this.playerView()));
         this.simTime += STEP;
         this.acc -= STEP;
         steps++;
@@ -815,6 +860,7 @@ export class Game {
       }
       if (steps === 24) this.acc = 0; // way behind: drop time rather than spiral
       this.stepTraffic(dt);
+      this.stepPolice(dt);
       this.gameplay(dt, c);
     }
 
@@ -864,6 +910,8 @@ export class Game {
     this.cityView.setNight(night);
     this.trafficView.setNight(night);
     this.trafficView.update(this.traffic.cars, time);
+    this.policeView.setNight(night);
+    this.policeView.update(this.police.units, this.police.patrols(), time, this.renderPos.x, this.renderPos.z);
     this.cityView.update(time, this.traffic.time);
     if (this.bloom.enabled) {
       // By day only very hot highlights bloom; at night lights and windows do.
@@ -906,6 +954,7 @@ export class Game {
 
     // HUD + sound.
     if (this.state === "drive") {
+      this.hud.setPursuit(this.pursuitHud());
       this.hud.update({
         speedKmh: this.car.speedKmh,
         rpm: this.car.rpm,
@@ -935,8 +984,13 @@ export class Game {
       paused: this.state !== "drive",
       camera: this.rig.mode,
     });
-    if (this.state === "drive") this.audio.updateTraffic(this.trafficSounds());
-    else this.audio.updateTraffic([]);
+    if (this.state === "drive") {
+      this.audio.updateTraffic(this.trafficSounds());
+      this.audio.updateSirens(this.sirenSounds());
+    } else {
+      this.audio.updateTraffic([]);
+      this.audio.updateSirens([]);
+    }
 
     if (this.bloom.enabled && this.bloom.strength > 0.01) this.composer.render(dt);
     else this.renderer.render(this.scene, this.camera);
@@ -973,6 +1027,7 @@ export class Game {
       this.cityView.breakLamp(lamp);
       this.audio.impact(0.35);
       this.rig.bump(0.2);
+      this.offence("property");
     }
     if (ev.landed > 4) {
       this.rig.bump(clamp(ev.landed / 20, 0, 0.8));
@@ -1159,14 +1214,154 @@ export class Game {
         }
       }
     }
-    for (const c of this.traffic.cars) {
+    const cars: { x: number; y: number; z: number; length: number; width: number }[] = this.traffic.cars.map((c) => ({ x: c.x, y: c.y, z: c.z, length: c.model.length, width: c.model.width }));
+    for (const u of this.police.units) cars.push({ x: u.phys.x, y: u.phys.y, z: u.phys.z, length: u.phys.def.body.length, width: u.phys.def.body.width });
+    for (const c of cars) {
       const dx = c.x - ox;
       const dz = c.z - oz;
-      const ahead = dx * fx + dz * fz - c.model.length / 2;
+      // Police cars park at any angle: use the larger half-extent both ways.
+      const ext = Math.max(c.length, c.width) / 2;
+      const ahead = dx * fx + dz * fz - ext;
       if (ahead <= 0 || ahead >= best || Math.abs(c.y - car.y) > 3) continue;
-      if (Math.abs(-dx * fz + dz * fx) < c.model.width / 2 + 1.2) best = ahead;
+      if (Math.abs(-dx * fz + dz * fx) < ext + 1.2) best = ahead;
     }
     return best;
+  }
+
+  // ===========================================================================
+  // Police
+  // ===========================================================================
+
+  playerView(): PlayerView {
+    const c = this.car;
+    return { x: c.x, y: c.y, z: c.z, vx: c.vx, vz: c.vz, heading: c.heading, speed: c.speed, car: c };
+  }
+
+  /** An offence happened: it only counts if a police car saw it. */
+  private offence(o: Offence): void {
+    const seen = o === "takedown" || o === "rammed-cop" || this.police.witness(this.playerView());
+    this.onHeat(this.heat.offence(o, seen));
+  }
+
+  private stepPolice(dt: number): void {
+    const h = this.heat;
+    const d = Math.min(dt, 0.05);
+    const wasActive = h.active;
+    const ev = this.police.step(d, this.playerView(), h.heat, h.state);
+    for (const o of ev.witnessed) this.onHeat(h.offence(o, true));
+    if (wasActive) for (const u of ev.joined) this.hud.toast("UNIT RESPONDING", `${u.phys.def.name} joins the pursuit`, "warn");
+    if (ev.roadblock) this.hud.toast("ROADBLOCK AHEAD", `${ev.roadblock.road.name} is blocked - look for the gap`, "warn");
+    this.onHeat(h.update(d, this.police.anyoneSees(), this.police.nearest(this.car.x, this.car.z), this.car.speed, this.police.boxedIn(this.car.x, this.car.z)));
+    this.traffic.obstacles = this.police.trafficObstacles();
+    // Result card.
+    if (this.resultTimer > 0) {
+      this.resultTimer -= dt;
+      if (this.resultTimer <= 0) this.hud.setResult(null);
+    }
+  }
+
+  private onHeat(events: HeatEvent[]): void {
+    const fmt = (n: number) => Math.round(n).toLocaleString("en-US");
+    const what: Record<Offence, string> = { speeding: "Speeding", "rammed-car": "Hit and run", "rammed-cop": "Ramming a police car", property: "Damage to property", takedown: "Police car taken out" };
+    for (const e of events) {
+      this.heatLog.push(e);
+      switch (e.type) {
+        case "pursuit-start":
+          this.hud.toast("PURSUIT", `${what[e.offence!]} - the police are after you`, "warn");
+          this.audio.sting("alert");
+          break;
+        case "heat-up":
+          this.hud.toast(`HEAT LEVEL ${e.heat}`, e.heat >= 3 ? "More units, roadblocks ahead" : "More units joining", "warn");
+          this.audio.sting("heat");
+          break;
+        case "offence":
+          if (e.offence === "takedown") this.hud.toast("TAKEDOWN", `+${fmt(e.bounty!)} bounty`, "gold");
+          break;
+        case "cooldown":
+          this.hud.toast("COOLDOWN", "They lost you - stay out of sight", "info");
+          break;
+        case "spotted":
+          this.hud.toast("SPOTTED", "Pursuit back on", "warn");
+          this.audio.sting("alert");
+          break;
+        case "escaped": {
+          this.audio.sting("escaped");
+          this.hud.setResult("escaped", "ESCAPED", `Bounty +${fmt(e.bounty!)} · total ${fmt(this.heat.totalBounty)}`);
+          this.resultTimer = 3.6;
+          this.save.bounty = this.heat.totalBounty;
+          this.save.escapes = this.heat.escapes;
+          this.save.bestBounty = Math.max(this.save.bestBounty, e.bounty!);
+          break;
+        }
+        case "busted":
+          this.audio.sting("busted");
+          this.hud.setResult("busted", "BUSTED", `Bounty of ${fmt(e.bounty!)} lost`);
+          this.resultTimer = 3.6;
+          this.save.busts = this.heat.busts;
+          break;
+        case "calm":
+          // After a bust you get your car back on the road nearby, police gone.
+          if (this.heat.busts > 0 && this.heatLog.at(-2)?.type === "busted") this.resetCar();
+          this.police.standDown();
+          break;
+      }
+    }
+  }
+
+  private applyPoliceHits(ev: ReturnType<Police["collide"]>): void {
+    for (const r of ev.rams) {
+      const s = clamp(r.impact / 25, 0, 1);
+      if (this.simTime - this.lastImpactSound > 0.12) {
+        this.audio.impact(clamp(s * 1.2, 0.15, 1));
+        this.lastImpactSound = this.simTime;
+      }
+      this.rig.bump(s * 0.8);
+      for (let i = 0; i < 6 + s * 24; i++) {
+        this.effects.sparks.emit(r.x, this.car.y + 0.5 + Math.random() * 0.4, r.z, (Math.random() - 0.5) * 8, Math.random() * 4 + 1, (Math.random() - 0.5) * 8, 0.3 + Math.random() * 0.3, 0.13, -0.1, 1, 0.8, 0.4);
+      }
+      if (this.drift.points > 0 && r.impact > 7) this.drift.reset();
+    }
+    for (const o of ev.witnessed) this.onHeat(this.heat.offence(o, true));
+    for (const hn of ev.horns) {
+      const [right, fwd] = this.relative(hn.car.x, hn.car.z);
+      this.audio.horn(right, fwd, hn.long);
+    }
+  }
+
+  private sirenSounds() {
+    const out = [];
+    const near = this.police.units
+      .filter((u) => u.siren && u.mode !== "wrecked")
+      .map((u) => ({ u, d: Math.hypot(u.phys.x - this.car.x, u.phys.z - this.car.z) }))
+      .filter((o) => o.d < 260)
+      .sort((a, b) => a.d - b.d)
+      .slice(0, 3);
+    for (const { u, d } of near) {
+      const [right, fwd] = this.relative(u.phys.x, u.phys.z);
+      const dx = (this.car.x - u.phys.x) / (d || 1);
+      const dz = (this.car.z - u.phys.z) / (d || 1);
+      const closing = (u.phys.vx - this.car.vx) * dx + (u.phys.vz - this.car.vz) * dz;
+      out.push({ id: u.id, right, fwd, closing, yelp: d < 40 && u.mode === "pursue" });
+    }
+    return out;
+  }
+
+  private pursuitHud() {
+    const h = this.heat;
+    const blips: { x: number; z: number; kind: "unit" | "block" | "patrol" }[] = [];
+    for (const u of this.police.units) if (u.mode !== "wrecked") blips.push({ x: u.phys.x, z: u.phys.z, kind: u.mode === "roadblock" ? "block" : "unit" });
+    for (const c of this.police.patrols()) blips.push({ x: c.x, z: c.z, kind: "patrol" });
+    return {
+      state: h.state,
+      heat: h.heat,
+      bounty: h.bounty,
+      evade: h.evade,
+      cooldown: h.cooldown,
+      bust: h.bust,
+      units: this.police.units.filter((u) => u.mode === "pursue" || u.mode === "search").length,
+      blips,
+      red: this.policeView.redPhase,
+    };
   }
 
   private playerState() {
@@ -1211,6 +1406,7 @@ export class Game {
         }
         this.trafficHits++;
         if (this.drift.points > 0 && h.impact > 7) this.drift.reset();
+        if (h.impact > 4) this.offence("rammed-car");
       }
     }
     for (const hn of ev.horns) {
@@ -1292,6 +1488,17 @@ export class Game {
       audioLevel: this.audio.level(),
       gearRaw: c.gear,
       district: this.city.districtOf(c.x, c.z),
+      heatState: this.heat.state,
+      heat: this.heat.heat,
+      bounty: this.heat.bounty,
+      totalBounty: this.heat.totalBounty,
+      bust: this.heat.bust,
+      cooldown: this.heat.cooldown,
+      escapes: this.heat.escapes,
+      busts: this.heat.busts,
+      units: this.police.units.filter((u) => u.mode === "pursue" || u.mode === "search").length,
+      roadblocks: this.police.roadblocks.length,
+      patrols: this.police.patrols().length,
       drawCalls: this.renderer.info.render.calls,
       triangles: this.renderer.info.render.triangles,
     };
