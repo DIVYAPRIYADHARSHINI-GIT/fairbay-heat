@@ -159,7 +159,7 @@ export function buildWorldView(world: World, maxAniso: number): WorldView {
   };
 
   // ---- roads ---------------------------------------------------------------------
-  for (const r of world.net.roads) buildRoad(r, geo);
+  for (const r of world.net.roads) buildRoad(r, geo, world);
   for (const n of world.net.nodes.values()) buildJunction(n, world, geo);
 
   // ---- buildings -----------------------------------------------------------------
@@ -322,7 +322,7 @@ function wall(r: Road, g: (x: number, z: number, k: Mat) => Geo, k: Mat, lat: nu
   }
 }
 
-function buildRoad(r: Road, g: (x: number, z: number, k: Mat) => Geo): void {
+function buildRoad(r: Road, g: (x: number, z: number, k: Mat) => Geo, world: World): void {
   const k = r.spec;
   const s0 = Math.max(0, r.s0 - 1);
   const s1 = Math.min(r.length, r.s1 + 1);
@@ -336,6 +336,57 @@ function buildRoad(r: Road, g: (x: number, z: number, k: Mat) => Geo): void {
       const b = side * (hw + r.sidewalk);
       ribbon(r, g, "sidewalk", Math.min(a, b), Math.max(a, b), s0, s1, CURB + 0.02, 3, WHITE);
       wall(r, g, "curb", side * hw, s0, s1, 0.0, CURB + 0.02, WHITE);
+    }
+  }
+  // Overpasses / viaducts: deck sides, underside, parapets and column bents.
+  // Only where the deck is clearly above the ground (the low ends sit on
+  // embankment terrain).
+  for (const [o0, o1] of r.overpasses) {
+    const ext = hw + r.sidewalk + 0.4;
+    const a = Math.max(s0, o0);
+    const b = Math.min(s1, o1);
+    const grey = new THREE.Color(0.82, 0.82, 0.8);
+    for (const side of [1, -1]) {
+      wall(r, g, "bridge", side * ext, a, b, -1.4, 0.95, grey);
+    }
+    ribbon(r, g, "bridge", -ext, ext, a, b, -1.4, 4, new THREE.Color(0.5, 0.5, 0.5));
+    // Under-deck face (visible when driving beneath): reversed ribbon.
+    for (let s = a; s < b - 0.5; s += 4) {
+      const e = Math.min(b, s + 4);
+      const p0 = r.center.sample(s);
+      const p1 = r.center.sample(e);
+      const t0 = r.center.tangent(s);
+      const t1 = r.center.tangent(e);
+      const y0 = r.heightAt(s) - 1.4;
+      const y1 = r.heightAt(e) - 1.4;
+      const G = g(p0.x, p0.z, "bridge");
+      const A = [p0.x - t0.tz * ext, y0, p0.z + t0.tx * ext];
+      const B = [p0.x + t0.tz * ext, y0, p0.z - t0.tx * ext];
+      const C = [p1.x + t1.tz * ext, y1, p1.z - t1.tx * ext];
+      const D = [p1.x - t1.tz * ext, y1, p1.z + t1.tx * ext];
+      G.face([A, D, C, B], [0, -1, 0], [[0, 0], [1, 0], [1, 1], [0, 1]], new THREE.Color(0.42, 0.42, 0.42));
+    }
+    // Column bents every ~30 m where the deck is > 4 m above the terrain
+    // and the column does not land on another road.
+    for (let s = a + 12; s < b - 6; s += 30) {
+      const p = r.center.sample(s);
+      const t = r.center.tangent(s);
+      const y = r.heightAt(s) - 1.4;
+      for (const lat of r.cls === "freeway" ? [-ext * 0.62, 0, ext * 0.62] : [0]) {
+        const x = p.x - t.tz * lat;
+        const z = p.z + t.tx * lat;
+        const ground = world.terrainAt(x, z);
+        if (y - ground < 4) continue;
+        let blocked = false;
+        for (const o of world.net.roadsAt(x, z)) if (o.road !== r) blocked = true;
+        if (world.net.roadAt(x, z, 1.2, ground)?.road !== undefined && world.net.roadAt(x, z, 1.2, ground)!.road !== r) blocked = true;
+        if (blocked) continue;
+        const G = g(x, z, "bridge");
+        boxObb(G, x, z, 0.8, 0.8, Math.atan2(t.tz, t.tx), ground - 0.5, y, grey);
+      }
+      // Cap beam across the bent.
+      const G = g(p.x, p.z, "bridge");
+      boxObb(G, p.x, p.z, 0.9, ext * 0.85, Math.atan2(t.tz, t.tx), y - 1.1, y, grey);
     }
   }
   // Bridges: deck underside, sides and piers.
@@ -662,7 +713,7 @@ function buildWater(group: THREE.Group): THREE.Mesh[] {
 
 function buildFountain(world: World): THREE.Group {
   const g = new THREE.Group();
-  const y = world.net.nodes.get("rb-A")!.elev;
+  const y = world.net.nodes.get("rb-N")!.elev;
   const c = world.circle;
   const R = world.islandR;
   const grass = new THREE.Mesh(new THREE.CylinderGeometry(R, R + 0.3, 0.35, 64), new THREE.MeshStandardMaterial({ map: T.grass(), color: 0x7aa05a, roughness: 1 }));
@@ -672,9 +723,10 @@ function buildFountain(world: World): THREE.Group {
   kerb.rotation.x = Math.PI / 2;
   kerb.position.set(c.x, y + 0.2, c.z);
   const basinMat = new THREE.MeshStandardMaterial({ color: 0xd8d2c4, roughness: 0.7 });
-  const basin = new THREE.Mesh(new THREE.CylinderGeometry(14, 14.5, 0.9, 48, 1, true), basinMat);
+  const bR = Math.min(14, R * 0.55);
+  const basin = new THREE.Mesh(new THREE.CylinderGeometry(bR, bR + 0.5, 0.9, 48, 1, true), basinMat);
   basin.position.set(c.x, y + 0.6, c.z);
-  const pool = new THREE.Mesh(new THREE.CircleGeometry(13.9, 48), new THREE.MeshStandardMaterial({ color: 0x3d7f9a, roughness: 0.05, metalness: 0.2 }));
+  const pool = new THREE.Mesh(new THREE.CircleGeometry(bR - 0.1, 48), new THREE.MeshStandardMaterial({ color: 0x3d7f9a, roughness: 0.05, metalness: 0.2 }));
   pool.rotation.x = -Math.PI / 2;
   pool.position.set(c.x, y + 0.85, c.z);
   const column = new THREE.Mesh(new THREE.CylinderGeometry(1.2, 2.2, 7, 16), basinMat);

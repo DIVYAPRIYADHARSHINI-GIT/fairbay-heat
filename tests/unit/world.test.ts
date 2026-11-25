@@ -17,11 +17,11 @@ describe("hand-made map", () => {
     expect(again.trees.length).toBe(world.trees.length);
   });
 
-  it("is a real network, not a grid: curved roads, varied junction angles, 20+ km of road", () => {
+  it("is a real network, not a grid or rings: curved roads, varied junction angles, 25+ km of road", () => {
     expect(net.roads.length).toBe(ROADS.length);
     expect(net.nodes.size).toBe(NODES.length);
     const km = net.roads.reduce((a, r) => a + r.length, 0) / 1000;
-    expect(km).toBeGreaterThan(20);
+    expect(km).toBeGreaterThan(25);
     // Many roads curve: heading changes by > 20 degrees along them.
     let curved = 0;
     for (const r of net.roads) {
@@ -29,7 +29,7 @@ describe("hand-made map", () => {
       const b = r.center.tangent(r.s1 - 2);
       if (Math.acos(Math.max(-1, Math.min(1, a.tx * b.tx + a.tz * b.tz))) > (20 * Math.PI) / 180) curved++;
     }
-    expect(curved).toBeGreaterThan(25);
+    expect(curved).toBeGreaterThan(20);
     // Junction approach angles are not all multiples of 90 degrees.
     let oblique = 0;
     for (const n of net.nodes.values()) {
@@ -38,21 +38,58 @@ describe("hand-made map", () => {
         if (d > 12 && d < 78) oblique++;
       }
     }
-    expect(oblique).toBeGreaterThan(30);
+    expect(oblique).toBeGreaterThan(40);
   });
 
-  it("has every feature: roundabout, freeway loop, river bridges, mountain pass, coast road, all districts", () => {
-    expect([...net.nodes.values()].filter((n) => n.kind === "roundabout").length).toBe(6);
-    expect(net.roads.filter((r) => r.cls === "freeway").length).toBe(8);
+  it("has highways, ramps, service roads, overpasses, a roundabout, bridges and a mountain pass", () => {
+    const cls = (c: string) => net.roads.filter((r) => r.cls === c).length;
+    expect(cls("freeway")).toBeGreaterThanOrEqual(6);
+    expect(cls("ramp")).toBeGreaterThanOrEqual(4);
+    expect(cls("service")).toBeGreaterThanOrEqual(8);
+    expect(net.overpassCount).toBeGreaterThanOrEqual(4);
+    expect([...net.nodes.values()].filter((n) => n.kind === "roundabout").length).toBe(4);
     expect(net.roads.filter((r) => r.bridges.length > 0).length).toBeGreaterThanOrEqual(2);
     expect(net.nodes.get("SU")!.elev).toBeGreaterThan(100);
     const districts = new Set(world.buildings.map((b) => b.district));
-    for (const d of ["downtown", "midtown", "oldtown", "hillcrest", "westside", "ironworks", "port", "beach", "southside"]) expect(districts.has(d as never), d).toBe(true);
-    expect(world.buildings.length).toBeGreaterThan(500);
+    for (const d of ["downtown", "midtown", "oldtown", "hillcrest", "westside", "ironworks", "port", "southside"]) expect(districts.has(d as never), d).toBe(true);
+    expect(world.buildings.length).toBeGreaterThan(700);
+  });
+
+  it("is asymmetric: no single centre - roads are spread unevenly in every quadrant", () => {
+    // Road length per quadrant around the map centre differs a lot (rings would be even).
+    const q = [0, 0, 0, 0];
+    for (const r of net.roads) {
+      for (let i = 1; i < r.center.n; i++) {
+        const x = r.center.x[i];
+        const z = r.center.z[i];
+        q[(x > 0 ? 1 : 0) + (z > 0 ? 2 : 0)] += r.center.s[i] - r.center.s[i - 1];
+      }
+    }
+    expect(Math.max(...q) / Math.min(...q)).toBeGreaterThan(1.3);
+  });
+
+  it("the I-9 viaduct passes OVER the Midtown avenues with real clearance, and you can drive underneath", () => {
+    const i9 = net.road("i9-2");
+    const ave = net.road("main-0");
+    // Find where Main Street passes under I-9.
+    let best = { s: 0, su: 0, d: Infinity };
+    for (let s = 0; s < i9.length; s += 1) {
+      const p = i9.center.sample(s);
+      const pr = ave.center.project(p.x, p.z);
+      if (pr.dist < best.d) best = { s, su: pr.s, d: pr.dist };
+    }
+    expect(best.d).toBeLessThan(1);
+    const deck = i9.heightAt(best.s);
+    const under = ave.heightAt(best.su);
+    expect(deck - under).toBeGreaterThan(6.5);
+    const p = i9.center.sample(best.s);
+    // A car on the deck stays on the deck, a car below stays below.
+    expect(world.ground(p.x, p.z, deck + 0.2)).toBeCloseTo(deck, 0);
+    expect(world.ground(p.x, p.z, under + 0.2)).toBeLessThan(under + 1);
   });
 
   it("every lane is reachable from every other (one strongly-connected network)", () => {
-    const start = net.road("bay-1").lanesFwd[0];
+    const start = net.road("main-5").lanesFwd[0];
     const reach = (from: typeof start, rev: boolean) => {
       const seen = new Set([from.id]);
       const q = [from];
@@ -107,8 +144,11 @@ describe("hand-made map", () => {
     for (const lane of net.lanes) {
       for (let s = 3; s < lane.length - 3; s += 6) {
         const p = lane.poly.sample(s);
+        const y = world.ground(p.x, p.z, lane.road!.heightAt(lane.road!.center.project(p.x, p.z).s));
         for (const c of world.colliders.query(p.x, p.z, 3)) {
           if (c.kind === "circle" && c.breakable) continue;
+          // Obstacles on a deck overhead (or below a viaduct) are not in the way.
+          if (c.base > y + 2.5 || c.base + c.top < y) continue;
           const hit = collide(p.x, p.z, 0.9, c);
           expect(hit, `${lane.road!.id} @ ${s.toFixed(0)} hits ${c.kind}`).toBeNull();
         }
@@ -121,7 +161,10 @@ describe("hand-made map", () => {
       let prev = NaN;
       for (let s = 0; s <= seg.length; s += 1) {
         const p = seg.poly.sample(s);
-        const g = world.ground(p.x, p.z);
+        // Ask with the previous height, as a car driving along does (starting
+        // from the lane's own road surface, not whatever deck is overhead).
+        const start = seg.road ? seg.road.heightAt(seg.road.center.project(p.x, p.z).s) : seg.node!.elev;
+        const g = world.ground(p.x, p.z, Number.isNaN(prev) ? start : prev);
         if (!Number.isNaN(prev)) expect(Math.abs(g - prev), `${seg.kind} ${seg.road?.id ?? seg.node?.id} @ ${s}`).toBeLessThan(0.25);
         prev = g;
       }
@@ -129,7 +172,7 @@ describe("hand-made map", () => {
   });
 
   it("the driving surface follows the road profile and bridges span the river above the water", () => {
-    const r = net.road("bridge-n");
+    const r = net.roads.find((x) => x.bridges.length > 0 && x.cls !== "freeway")!;
     const [b0, b1] = r.bridges[0];
     const mid = (b0 + b1) / 2;
     const p = r.center.sample(mid);
@@ -148,9 +191,9 @@ describe("hand-made map", () => {
     expect(world.districtOf(-e, z)).toBe("sea");
   });
 
-  it("spawn is in a lane of Bay Street, on the road surface", () => {
+  it("spawn is in a lane of Main Street downtown, on the road surface", () => {
     const s = world.spawn;
-    expect(net.roadAt(s.x, s.z)?.road.id).toBe("bay-1");
+    expect(net.roadAt(s.x, s.z)?.road.id).toBe("main-5");
     expect(world.surface(s.x, s.z)).toBe("road");
   });
 

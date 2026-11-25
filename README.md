@@ -44,6 +44,8 @@ automatically in the browser.
 
 ## Cars
 
+Every car has its own detailing styled after the real car: headlight and tail-light graphics, grille pattern, wheel design and colour, brake caliper colour, door seams and handles, splitter, side skirts, diffuser and number plates. Each car also has its own steering feel, set by five numbers: lock, how quickly the wheel winds on, how quickly it re-centres, how calm it gets at high speed, and how loose the rear is. Examples: the Mustanger is heavy and tail-happy, the Aventura razor-sharp, the Veyrone calm and planted. The garage shows a steering description for each car, and **Settings > Steering sensitivity** scales all of them. Traffic vehicles have shaped bodies too (sloped screens, rooflines, wheel arches, mirrors, bumpers, taxi signs, bus destination boards).
+
 Stylised, fictional takes on Most Wanted 2013 cars. The names resemble the
 real cars but are not the trademarks. 0–100 km/h time and top speed are
 calibrated per car and verified by unit tests.
@@ -61,16 +63,18 @@ There are 12 jack spots across the map, parked at the kerb of named roads (orang
 
 ## The map
 
-Fairbay is a **hand-designed map** (no grid): 72 named, curving roads and
-42 junctions over ~2.6 x 2.6 km, all defined in `src/game/mapdata.ts`.
+Fairbay is a **hand-designed, asymmetric map** (no grid, no rings), in the
+spirit of GTA / NFS Most Wanted: 143 named roads and 83 junctions,
+31.5 km of road, all defined in `src/game/mapdata.ts`.
 
-- **Fairbay Circle**: a six-exit roundabout with a fountain at the heart of Downtown.
-- Six curving avenues radiate from it, crossed by the inner **Crescent** and the outer **Ring Road** boulevard, so blocks are wedges and curves.
-- The **Fairbay Loop** freeway (3 lanes each way, concrete median) circles everything, with 8 interchanges.
-- **Old Town** and **Hillcrest** to the north, **Ironworks** (tank farms) to the east, **Port Fairbay** (containers, gantry cranes) and **Sunset Beach** on the south coast.
-- The **Fair River** runs from a mountain lake to the sea; the **Riverside Bridge** and the **Coast Highway** bridge cross it to **Westside**.
-- **Calder Pass**: a hairpin mountain road with guard rails over Mount Calder (150 m summit) down to Westside.
-- Real terrain (hills, river valley, beaches), road embankments, 7 off-road jump ramps, ~3,900 trees, traffic lights, street signs, a full day/night cycle.
+- **Interstate 9** crosses the whole map west to east. It bridges the Fair River, then runs on an **elevated viaduct** through Midtown (level deck, 7.5 m over the streets, column bents) to the Airfield.
+- **Frontage (service) roads** run underneath the viaduct on both sides: one-way, 2 lanes, with signals at every avenue. **On/off ramps** connect them to I-9 at both ends.
+- **Route 7 Bayshore Expressway** runs north from the container port to I-9.
+- Wherever a highway crosses a street without a junction, the road network automatically lifts it onto an **overpass**. The physics, traffic and camera all understand stacked roads, so you can drive on the deck or underneath it.
+- **Downtown** towers stand on the shore of Fairbay Bay, with Waterfront Drive along the water. **Midtown** has avenues running under the viaduct, the curving Kingsway and the diagonal Grand Avenue.
+- **Old Town** has winding streets around a small roundabout square, plus **Central Park**. Further out are the **Hillcrest** suburbs and **Ridge Parkway** along the northern hills.
+- The **Fairbay Airfield** has a 460 m runway (a top-speed strip) with a jump at the end. **Ironworks** has tank farms, **Port Fairbay** has containers and cranes, and the **Coast Highway** runs along **Sunset Beach**.
+- The **Calder Pass** hairpins climb over Mount Calder (150 m) and down to **Westside** across the river.
 
 ## Stage 2: traffic
 
@@ -91,7 +95,7 @@ pipe and a muffler:
 
 - Each car has its own engine: cross-plane V8 burble (Mustanger), flat-6 (Carrara), V12s (Vantis, Aventura), twin-turbo V6 (GT-Arr) and quad-turbo W16 (Veyrone).
 - A real 6-speed gearbox: the revs drop on each upshift and blip on downshifts; there is a rev limiter.
-- Turbo whistle and blow-off "pssh", overrun pops and crackles, intake roar.
+- Turbo whistle, overrun pops and crackles, intake roar. There is no hiss on gear changes; a unit test asserts the high-frequency energy does not jump after an upshift.
 - Tyre squeal, road and gravel noise, wind, echo off buildings downtown, traffic engines with Doppler, horns, crash and landing sounds.
 
 ## How it's built: no game engine

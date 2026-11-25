@@ -80,6 +80,8 @@ export class Road {
   lanesBwd: LaneSeg[] = [];
   /** Arc-length ranges where the road crosses water (bridges). */
   bridges: [number, number][] = [];
+  /** Arc-length ranges where the road is lifted over another road (overpass). */
+  overpasses: [number, number][] = [];
 
   constructor(
     readonly def: RoadDef,
@@ -109,8 +111,15 @@ export class Road {
     return this.elev[i] + (this.elev[i + 1] - this.elev[i]) * f;
   }
 
+  /** True on any raised deck (river bridge or overpass): no terrain under it. */
   isBridge(s: number): boolean {
     for (const [a, b] of this.bridges) if (s >= a && s <= b) return true;
+    for (const [a, b] of this.overpasses) if (s >= a && s <= b) return true;
+    return false;
+  }
+
+  isOverpass(s: number): boolean {
+    for (const [a, b] of this.overpasses) if (s >= a && s <= b) return true;
     return false;
   }
 
@@ -123,7 +132,7 @@ export class Road {
 }
 
 /** Class rank used to decide right of way at priority junctions. */
-const RANK: Record<RoadClass, number> = { freeway: 6, ring: 5, boulevard: 4, coast: 4, avenue: 3, mountain: 2, street: 1 };
+const RANK: Record<RoadClass, number> = { freeway: 6, ramp: 5, ring: 5, boulevard: 4, coast: 4, avenue: 3, service: 3, mountain: 2, street: 1, runway: 1 };
 
 export interface NetworkOptions {
   /** Natural ground height (without water carving) used for road profiles. */
@@ -180,6 +189,7 @@ export class RoadNetwork {
       r.s1 = Math.max(r.length - r.to.radius, r.length * 0.55);
     }
     this.elevations(opts);
+    this.gradeSeparate();
     this.findBridges(opts);
     this.buildLanes();
     this.buildConnectors();
@@ -219,7 +229,7 @@ export class RoadNetwork {
           cnt++;
         }
       }
-      n.elev = sum / cnt;
+      n.elev = sum / cnt + (n.def.lift ?? 0);
     }
     // Pull junction heights together where a road between them would be too
     // steep (keeps every road within its grade limit).
@@ -283,6 +293,98 @@ export class RoadNetwork {
       limitGradePinned(r.elev, c.s, r.cls === "mountain" ? 0.15 : 0.1, ra, L - rb);
     }
   }
+
+  /**
+   * Where two roads cross without sharing a junction, lift the more important
+   * one onto an overpass: 7.5 m clearance at the crossing, ramping up and
+   * down at no more than 5%. Highways always go over streets.
+   */
+  private gradeSeparate(): void {
+    const rank = (r: Road) => (r.cls === "freeway" ? 10 : r.cls === "ramp" ? 8 : RANK[r.cls]);
+    const crossings: { top: Road; s: number; under: Road; su: number }[] = [];
+    for (let a = 0; a < this.roads.length; a++) {
+      for (let b = a + 1; b < this.roads.length; b++) {
+        const A = this.roads[a];
+        const B = this.roads[b];
+        const shared = A.from === B.from || A.from === B.to || A.to === B.from || A.to === B.to;
+        for (const [sa, sb] of polyCrossings(A.center, B.center)) {
+          // Ignore touches inside a shared junction.
+          if (shared && (sa < A.s0 + 2 || sa > A.s1 - 2 || sb < B.s0 + 2 || sb > B.s1 - 2)) continue;
+          const top = rank(A) >= rank(B) ? A : B;
+          const under = top === A ? B : A;
+          crossings.push({ top, s: top === A ? sa : sb, under, su: top === A ? sb : sa });
+        }
+      }
+    }
+    const CLEAR = 7.5;
+    const G = 0.05;
+    // A road crossing several streets becomes one continuous viaduct: hold
+    // the deck at the highest required level between its first and last
+    // crossing instead of dipping between them.
+    const byRoad = new Map<Road, typeof crossings>();
+    for (const c of crossings) byRoad.set(c.top, [...(byRoad.get(c.top) ?? []), c]);
+    for (const [r, cs] of byRoad) {
+      if (cs.length < 2) continue;
+      const s0 = Math.min(...cs.map((c) => c.s));
+      const s1 = Math.max(...cs.map((c) => c.s));
+      if (s1 - s0 > 900) continue;
+      const level = Math.max(...cs.map((c) => c.under.heightAt(c.su))) + CLEAR;
+      for (let i = 0; i < r.center.n; i++) {
+        const s = r.center.s[i];
+        if (s >= s0 && s <= s1) r.elev[i] = Math.max(r.elev[i], level);
+      }
+    }
+    for (const c of crossings) {
+      const r = c.top;
+      const target = c.under.heightAt(c.su) + CLEAR;
+      const span = 22;
+      for (let i = 0; i < r.center.n; i++) {
+        const d = Math.abs(r.center.s[i] - c.s);
+        const want = d <= span ? target : target - (d - span) * G;
+        if (want > r.elev[i]) r.elev[i] = want;
+      }
+      // Endpoints are pinned to junction heights; if the lift cannot fit,
+      // raise the junction itself (keeps the deck continuous).
+      for (const [node, s] of [
+        [r.from, 0],
+        [r.to, r.length],
+      ] as const) {
+        const need = target - Math.max(0, Math.abs(s - c.s) - span) * G;
+        if (need > node.elev) node.elev = need;
+      }
+      const lo = Math.max(0, c.s - span - (CLEAR / G) * 1.2);
+      const hi = Math.min(r.length, c.s + span + (CLEAR / G) * 1.2);
+      r.overpasses.push([lo, hi]);
+      this.overpassCount++;
+    }
+    // Re-pin junction discs (some were raised for a lift) and blend every
+    // road that touches them into the new height over ~30 m, then smooth.
+    for (const r of this.roads) {
+      const c = r.center;
+      const L = r.length;
+      for (let i = 0; i < c.n; i++) {
+        const s = c.s[i];
+        const ra = r.from.radius;
+        const rb = r.to.radius;
+        if (s <= ra) r.elev[i] = r.from.elev;
+        else if (s < ra + 30) r.elev[i] = lerpN(r.from.elev, r.elev[i], smooth01((s - ra) / 30));
+        if (L - s <= rb) r.elev[i] = r.to.elev;
+        else if (L - s < rb + 30) r.elev[i] = lerpN(r.to.elev, r.elev[i], smooth01((L - s - rb) / 30));
+      }
+      limitGradePinned(r.elev, c.s, r.cls === "mountain" ? 0.15 : 0.1, r.from.radius, r.length - r.to.radius);
+      // Merge overlapping overpass ranges.
+      r.overpasses.sort((a, b) => a[0] - b[0]);
+      const merged: [number, number][] = [];
+      for (const o of r.overpasses) {
+        const last = merged[merged.length - 1];
+        if (last && o[0] <= last[1]) last[1] = Math.max(last[1], o[1]);
+        else merged.push([...o]);
+      }
+      r.overpasses = merged;
+    }
+  }
+
+  overpassCount = 0;
 
   private findBridges(opts: NetworkOptions): void {
     for (const r of this.roads) {
@@ -383,12 +485,27 @@ export class RoadNetwork {
       };
       const groupOf = new Map<LaneSeg[], number>();
       if (n.kind === "signal" && incoming.length >= 2) {
-        const ref = axisOf(incoming[0]);
-        for (const inc of incoming) {
-          const d = Math.abs(wrapAngle(2 * (axisOf(inc) - ref))) / 2;
-          groupOf.set(inc, d < Math.PI / 4 ? 0 : 1);
+        // Pair each approach with the one most nearly opposite it (they share
+        // a green); every remaining approach gets its own phase.
+        const left = [...incoming];
+        let g = 0;
+        while (left.length) {
+          const a = left.shift()!;
+          const aa = axisOf(a);
+          let bi = -1;
+          let best = Math.PI / 5; // within 36 degrees of straight-opposite
+          left.forEach((b, i) => {
+            const d = Math.abs(wrapAngle(axisOf(b) - aa - Math.PI));
+            if (d < best) {
+              best = d;
+              bi = i;
+            }
+          });
+          groupOf.set(a, g);
+          if (bi >= 0) groupOf.set(left.splice(bi, 1)[0], g);
+          g++;
         }
-        n.groups = new Set(groupOf.values()).size;
+        n.groups = g;
         if (n.groups < 2) n.groups = 1;
       }
       const maxRank = Math.max(...n.ends.map((e) => (e.road.def.main ? 10 : RANK[e.road.cls])));
@@ -417,7 +534,13 @@ export class RoadNetwork {
           // turn (it represents a late lane change), so no lane is a trap.
           if (turn === "right") for (let j = 0; j < kk; j++) for (const i of m > 2 ? [m - 1, m - 2] : [m - 1]) pairs.push([i, j]);
           else if (turn === "left" || turn === "uturn") for (let j = 0; j < kk; j++) for (const i of m > 2 ? [0, 1] : [0]) pairs.push([i, j]);
-          else for (let i = 0; i < m; i++) pairs.push([i, Math.min(i, kk - 1)]);
+          else {
+            // Straight on: lane i -> lane i; when the road widens, the outer
+            // incoming lane also feeds the extra lanes (and when it narrows,
+            // extra incoming lanes merge into the outer one).
+            for (let i = 0; i < m; i++) pairs.push([i, Math.min(i, kk - 1)]);
+            for (let j = m; j < kk; j++) pairs.push([m - 1, j]);
+          }
           // Lanes that would otherwise have nowhere to go also get this exit
           // when it is the closest thing to straight on.
           pairs.push(...extraPairs(inc, out, turn, pairs));
@@ -517,12 +640,14 @@ export class RoadNetwork {
    * The road whose carriageway (plus `extra` metres) contains (x, z):
    * returns the road, arc length and signed lateral offset.
    */
-  roadAt(x: number, z: number, extra = 0): { road: Road; s: number; lat: number } | null {
+  roadAt(x: number, z: number, extra = 0, y?: number): { road: Road; s: number; lat: number } | null {
     const list = this.hash.get(this.key(Math.floor(x / this.cell), Math.floor(z / this.cell)));
     if (!list) return null;
     // For each road keep its CLOSEST segment (true projection: |lat| is then
     // the real distance); among roads that contain the point, prefer the one
-    // whose centreline is nearest relative to its half width.
+    // whose centreline is nearest relative to its half width - or, when a
+    // height `y` is given (stacked roads at an overpass), the road surface
+    // nearest to that height.
     let best: { road: Road; s: number; lat: number } | null = null;
     let bestScore = Infinity;
     const closest = new Map<Road, { s: number; lat: number; dist: number }>();
@@ -532,17 +657,37 @@ export class RoadNetwork {
       if (!prev || p.dist < prev.dist) closest.set(r, { s: p.s, lat: p.lat, dist: p.dist });
     }
     for (const [r, p] of closest) {
-      // Points beyond the road's ends project onto an endpoint: skip those.
       if (p.s <= 0.01 || p.s >= r.length - 0.01) continue;
       const over = p.dist - (r.hw + extra);
       if (over > 0) continue;
-      const score = p.dist / (r.hw + extra);
+      let score = p.dist / (r.hw + extra);
+      if (y !== undefined) {
+        const h = r.heightAt(p.s);
+        // Surfaces more than 1.5 m above us are out of reach (we are under them).
+        score = h > y + 1.5 ? 1e6 + h : Math.abs(y - h) * 10 + score;
+      }
       if (score < bestScore) {
         bestScore = score;
         best = { road: r, s: p.s, lat: p.lat };
       }
     }
     return best;
+  }
+
+
+  /** Every road whose carriageway contains (x, z), with arc length and offset. */
+  roadsAt(x: number, z: number): { road: Road; s: number; lat: number }[] {
+    const list = this.hash.get(this.key(Math.floor(x / this.cell), Math.floor(z / this.cell)));
+    if (!list) return [];
+    const closest = new Map<Road, { s: number; lat: number; dist: number }>();
+    for (const [r, i] of list) {
+      const p = r.center.projectSegment(x, z, i);
+      const prev = closest.get(r);
+      if (!prev || p.dist < prev.dist) closest.set(r, { s: p.s, lat: p.lat, dist: p.dist });
+    }
+    const out: { road: Road; s: number; lat: number }[] = [];
+    for (const [r, p] of closest) if (p.s > 0.01 && p.s < r.length - 0.01 && p.dist <= r.hw) out.push({ road: r, s: p.s, lat: p.lat });
+    return out;
   }
 
   /** Nearest road centreline point within `radius` metres. */
@@ -664,6 +809,11 @@ export function limitGrade(h: Float64Array, s: Float64Array, g: number): void {
   }
 }
 
+function smooth01(t: number): number {
+  const u = clamp(t, 0, 1);
+  return u * u * (3 - 2 * u);
+}
+
 function lerpN(a: number, b: number, t: number): number {
   return a + (b - a) * t;
 }
@@ -699,6 +849,34 @@ function bezier(a: Polyline, b: Polyline, uturn: boolean): Polyline {
     });
   }
   return new Polyline(pts);
+}
+
+/** All crossing points of two polylines, as (arc length on a, arc length on b). */
+function polyCrossings(a: Polyline, b: Polyline): [number, number][] {
+  const out: [number, number][] = [];
+  for (let i = 0; i < a.n - 1; i++) {
+    const ax0 = Math.min(a.x[i], a.x[i + 1]);
+    const ax1 = Math.max(a.x[i], a.x[i + 1]);
+    const az0 = Math.min(a.z[i], a.z[i + 1]);
+    const az1 = Math.max(a.z[i], a.z[i + 1]);
+    for (let j = 0; j < b.n - 1; j++) {
+      if (Math.max(b.x[j], b.x[j + 1]) < ax0 || Math.min(b.x[j], b.x[j + 1]) > ax1) continue;
+      if (Math.max(b.z[j], b.z[j + 1]) < az0 || Math.min(b.z[j], b.z[j + 1]) > az1) continue;
+      const p = a.x[i];
+      const q = a.z[i];
+      const rx = a.x[i + 1] - p;
+      const rz = a.z[i + 1] - q;
+      const sx = b.x[j + 1] - b.x[j];
+      const sz = b.z[j + 1] - b.z[j];
+      const den = rx * sz - rz * sx;
+      if (Math.abs(den) < 1e-9) continue;
+      const t = ((b.x[j] - p) * sz - (b.z[j] - q) * sx) / den;
+      const u = ((b.x[j] - p) * rz - (b.z[j] - q) * rx) / den;
+      if (t < 0 || t > 1 || u < 0 || u > 1) continue;
+      out.push([a.s[i] + t * (a.s[i + 1] - a.s[i]), b.s[j] + u * (b.s[j + 1] - b.s[j])]);
+    }
+  }
+  return out;
 }
 
 function polysCross(a: Polyline, b: Polyline): boolean {

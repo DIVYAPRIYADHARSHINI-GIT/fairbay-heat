@@ -299,6 +299,12 @@ kbd {
   height: 100%;
   background: linear-gradient(90deg, var(--accent), var(--accent-2));
 }
+.gi-feel {
+  margin-top: 8px;
+  font-size: 13px;
+  color: var(--muted);
+  font-style: italic;
+}
 .gi-specs {
   display: flex;
   gap: 16px;

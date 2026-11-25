@@ -15,7 +15,7 @@ import { Input } from "../core/input";
 import { clamp, damp, lerp, wrapAngle } from "../core/math";
 import { CARS, carById, ratings, type CarDef } from "./cars";
 import { World, DISTRICT_NAMES, type District } from "./world";
-import { Traffic } from "./traffic";
+import { Traffic, TRAFFIC_MODELS } from "./traffic";
 import { CarPhysics, NO_CONTROLS, type Controls } from "./physics";
 import { JACK_SPOTS, JACK_SPOT_DEFS, jackable, setJackSpots, type JackSpot } from "./jack";
 import { DriftScore, JumpTracker, MIN_JUMP } from "./scoring";
@@ -85,6 +85,7 @@ export class Game {
   private renderPos = new THREE.Vector3();
   private renderHeading = 0;
   private headlight!: THREE.SpotLight;
+  private headlight2!: THREE.SpotLight;
   private drift = new DriftScore();
   private jump = new JumpTracker();
   private district = "";
@@ -107,6 +108,8 @@ export class Game {
   private stuckTime = 0;
   private lastImpactSound = 0;
   trafficHits = 0;
+  /** Exposed for tests. */
+  readonly trafficModels = TRAFFIC_MODELS;
   readonly errors: string[] = [];
 
   constructor(private container: HTMLElement) {
@@ -153,9 +156,18 @@ export class Game {
     this.effects = new Effects();
     this.scene.add(this.effects.group, this.effects.speedLines);
     for (const spot of JACK_SPOTS) this.addParked(spot);
-    this.headlight = new THREE.SpotLight(0xfff2dd, 0, 110, 0.5, 0.5, 1.4);
-    this.headlight.castShadow = false;
-    this.scene.add(this.headlight, this.headlight.target);
+    // Two dipped-beam headlights. Real-world inverse-square falloff (decay 2)
+    // makes anything a few metres ahead ~100x brighter than the road at
+    // 40 m, so we use a gentle decay over a limited range and aim the beams
+    // down at the road - surfaces right in front get lit, never blown out.
+    const mkBeam = () => {
+      const l = new THREE.SpotLight(0xfff1dc, 0, 70, 0.42, 0.65, 0.9);
+      l.castShadow = false;
+      this.scene.add(l, l.target);
+      return l;
+    };
+    this.headlight = mkBeam();
+    this.headlight2 = mkBeam();
     this.spawnPlayer(this.save.carId, this.save.colorIndex);
     if (this.save.pos) {
       const p = this.save.pos;
@@ -235,6 +247,7 @@ export class Game {
     const def = carById(carId);
     const old = this.car;
     this.car = new CarPhysics(def);
+    this.car.sensitivity = this.save.steering;
     if (old) {
       this.car.place(old.x, old.z, old.heading, old.y);
       this.car.nitro = old.nitro;
@@ -364,6 +377,16 @@ export class Game {
             this.rig.mode = (this.rig.mode + d + CAMERA_MODES.length) % CAMERA_MODES.length;
             this.save.camera = this.rig.mode;
           },
+        },
+        {
+          id: "steering",
+          label: "Steering sensitivity",
+          value: () => `${Math.round(this.save.steering * 100)}%`,
+          adjust: (d) => {
+            this.save.steering = clamp(Math.round((this.save.steering + d * 0.1) * 10) / 10, 0.6, 1.6);
+            this.car.sensitivity = this.save.steering;
+          },
+          hint: "How quickly the steering responds to A/D (each car also has its own feel)",
         },
         { id: "fps", label: "FPS counter", value: () => (this.save.showFps ? "On" : "Off"), adjust: () => (this.save.showFps = !this.save.showFps) },
         {
@@ -565,7 +588,8 @@ export class Game {
       <div class="gi-class">${def.klass} · ${def.handling.drive}</div>
       <div class="gi-name">${def.name}</div>
       <div class="gi-inspired">Stylised after the ${def.inspiredBy}</div>
-      ${bar("Top speed", r.speed)}${bar("Acceleration", r.accel)}${bar("Handling", r.handling)}
+      ${bar("Top speed", r.speed)}${bar("Acceleration", r.accel)}${bar("Handling", r.handling)}${bar("Steering", clamp((def.handling.steering.rate - 3.5) / 6, 0, 1))}${bar("Tail-happy", def.handling.steering.rear)}
+      <div class="gi-feel">${steeringBlurb(def)}</div>
       <div class="gi-specs"><span>${def.handling.topSpeed} km/h</span><span>0-100 in ${def.handling.zeroTo100.toFixed(1)} s</span></div>
       <div class="gi-swatches">${def.colors.map((c, i) => `<i class="${i === this.garageColor ? "on" : ""}" style="background:${c}"></i>`).join("")}</div>
       <div class="gi-owned">${owned} of ${CARS.length} cars found${owned < CARS.length ? " - find the rest parked around Fairbay" : ""}</div>`;
@@ -806,8 +830,15 @@ export class Game {
       this.titleAngle += dt * 0.35;
       const L = this.car.def.body.length;
       const r = L * 1.35;
-      this.camera.position.set(this.renderPos.x + Math.sin(this.titleAngle) * r, this.renderPos.y + 1.6, this.renderPos.z + Math.cos(this.titleAngle) * r);
-      this.camera.lookAt(this.renderPos.x, this.renderPos.y + 0.5, this.renderPos.z);
+      const ga = this.titleAngle + this.renderHeading;
+      this.camera.position.set(this.renderPos.x + Math.sin(ga) * r, this.renderPos.y + 1.4, this.renderPos.z + Math.cos(ga) * r);
+      // Aim a little to the car's left (from the camera's view) so the car
+      // sits in the right half of the screen, clear of the garage panel.
+      const cx = this.renderPos.x - this.camera.position.x;
+      const cz = this.renderPos.z - this.camera.position.z;
+      const cl = Math.hypot(cx, cz) || 1;
+      const shift = r * 0.32;
+      this.camera.lookAt(this.renderPos.x + (cz / cl) * shift, this.renderPos.y + 0.5, this.renderPos.z - (cx / cl) * shift);
       if (this.camera.fov !== 50) {
         this.camera.fov = 50;
         this.camera.updateProjectionMatrix();
@@ -829,21 +860,29 @@ export class Game {
       // The bright daytime sky sits near 1.0 after tone mapping, so a day
       // bloom smears it over everything. Bloom is a night effect (lamps,
       // windows, tail lights): off by day, fading in at dusk.
-      this.bloom.strength = lerp(0, 0.55, night);
-      this.bloom.threshold = 0.95;
+      this.bloom.strength = lerp(0, 0.4, night);
+      this.bloom.threshold = 1.1;
+      this.bloom.radius = 0.35;
     }
     this.effects.update(this.state === "drive" ? dt : 0, time, this.state === "drive" ? this.car.speed / this.car.vmax : 0, this.camera);
 
-    // Headlight follows the car at night.
-    const hl = this.headlight;
-    hl.intensity = night > 0.15 ? night * 1600 : 0;
-    hl.visible = hl.intensity > 0;
-    if (hl.visible) {
-      const fx = Math.sin(this.renderHeading);
-      const fz = Math.cos(this.renderHeading);
-      hl.position.set(this.renderPos.x + fx * 2.4, this.renderPos.y + 0.75, this.renderPos.z + fz * 2.4);
-      hl.target.position.set(this.renderPos.x + fx * 30, this.renderPos.y, this.renderPos.z + fz * 30);
-    }
+    // Headlights follow the car at night (left + right dipped beams).
+    const beamI = night > 0.15 ? night * 60 : 0;
+    const fx = Math.sin(this.renderHeading);
+    const fz = Math.cos(this.renderHeading);
+    const half = this.car.def.body.width * 0.32;
+    const nose = this.car.def.body.length / 2;
+    [this.headlight, this.headlight2].forEach((hl, i) => {
+      hl.intensity = beamI;
+      hl.visible = beamI > 0;
+      if (!hl.visible) return;
+      const side = i === 0 ? 1 : -1;
+      const ox = fz * half * side;
+      const oz = -fx * half * side;
+      hl.position.set(this.renderPos.x + fx * nose + ox, this.renderPos.y + 0.7, this.renderPos.z + fz * nose + oz);
+      // Dipped: aimed at the road ~22 m ahead, slightly towards the kerb.
+      hl.target.position.set(this.renderPos.x + fx * 22 + ox * 1.6, this.renderPos.y - 0.4, this.renderPos.z + fz * 22 + oz * 1.6);
+    });
 
     // HUD + sound.
     if (this.state === "drive") {
@@ -1198,6 +1237,15 @@ export class Game {
     this.snapPrev();
     this.rig.snap();
   }
+}
+
+/** A one-line description of how a car steers, from its numbers. */
+function steeringBlurb(def: CarDef): string {
+  const f = def.handling.steering;
+  const quick = f.rate >= 8 ? "Razor-sharp, darty steering" : f.rate >= 6.5 ? "Precise, quick steering" : f.rate >= 5 ? "Weighty, progressive steering" : "Heavy, slow steering";
+  const rear = f.rear >= 0.7 ? "a loose rear that loves power oversteer" : f.rear >= 0.45 ? "a playful rear end" : "a planted, stable rear";
+  const speed = f.speedFalloff <= 20 ? ", very calm at high speed" : f.speedFalloff >= 28 ? ", stays twitchy at speed" : "";
+  return `${quick} with ${rear}${speed}.`;
 }
 
 function fmtHours(h: number): string {

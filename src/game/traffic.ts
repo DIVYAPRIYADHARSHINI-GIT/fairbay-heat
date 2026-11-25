@@ -151,7 +151,7 @@ export class Traffic {
   constructor(
     readonly net: RoadNetwork,
     seed = 77,
-    private ground: (x: number, z: number) => number = () => 0,
+    private ground: (x: number, z: number, y?: number) => number = () => 0,
   ) {
     this.rng = mulberry32(seed);
   }
@@ -432,12 +432,37 @@ export class Traffic {
     }
     if (sneaker) return Infinity;
     if (dist < 24) {
+      // Don't block the box: only enter if there is room for this car on the
+      // exit lane beyond the junction (otherwise a full exit makes cars stop
+      // inside the junction and gridlock the cross traffic).
+      if (!this.exitHasRoom(conn, car)) return dist - 1;
       const eta = dist / Math.max(2, car.v);
       // After a long wait, creep through cautiously (deadlock breaker).
       if (car.waited > 14 && !this.someoneOn(conn.conflicts)) return Infinity;
       if (!this.canEnter(conn, eta)) return dist - 1;
     }
     return Infinity;
+  }
+
+  /** True if the lane after `conn` has space for `car` (plus a gap) beyond the junction. */
+  private exitHasRoom(conn: LaneSeg, car: TrafficCar): boolean {
+    const exit = conn.to!;
+    const need = car.model.length + IDM.s0 + 1.5;
+    // Cars already on this connector or any connector into the same exit
+    // also need their space.
+    let queued = 0;
+    for (const c of [conn, ...conn.conflicts.filter((x) => x.to === exit), ...this.siblings(conn).filter((x) => x.to === exit)]) {
+      for (const o of this.onSeg.get(c.id) ?? []) if (o !== car) queued += o.model.length + IDM.s0;
+    }
+    let tail = Infinity;
+    for (const o of this.onSeg.get(exit.id) ?? []) {
+      if (o.v > 3) continue; // moving cars will make room
+      tail = Math.min(tail, o.s - o.model.length / 2);
+    }
+    if (tail === Infinity) return queued + need <= Math.max(exit.length, need) + 2;
+    // On a very short link (under a viaduct) never ask for more room than
+    // the link physically has.
+    return tail - queued >= Math.min(need, exit.length * 0.6);
   }
 
   private someoneOn(segs: LaneSeg[]): boolean {
@@ -548,7 +573,17 @@ export class Traffic {
     car.x = p.x;
     car.z = p.z;
     car.heading = Math.atan2(t.tx, t.tz);
-    car.y = this.ground(p.x, p.z);
+    // Height from the car's own road (so cars under a viaduct stay under it).
+    const seg = car.seg;
+    if (seg.road) car.y = seg.road.heightAt(seg.road.center.project(p.x, p.z).s);
+    else {
+      const a = car.seg.from!.road!;
+      const b = car.seg.to!.road!;
+      const f = car.s / Math.max(1e-3, car.seg.length);
+      const ha = a.heightAt(car.seg.from!.dir > 0 ? a.s1 : a.s0);
+      const hb = b.heightAt(car.seg.to!.dir > 0 ? b.s0 : b.s1);
+      car.y = this.ground(p.x, p.z, ha + (hb - ha) * f);
+    }
   }
 
   private stepWreck(car: TrafficCar, dt: number): void {
@@ -560,7 +595,7 @@ export class Traffic {
     car.x += car.wvx * dt;
     car.z += car.wvz * dt;
     car.heading += car.wyaw * dt;
-    car.y = this.ground(car.x, car.z);
+    car.y = this.ground(car.x, car.z, car.y);
     car.v = 0;
     car.braking = true;
     if (car.wrecked <= 0) {

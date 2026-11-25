@@ -21,6 +21,7 @@ import {
   CIRCLE,
   COAST,
   DISTRICT_NAMES,
+  DISTRICT_POLYS,
   LAKE,
   MOUNTAIN,
   PARK_POLY,
@@ -223,8 +224,9 @@ export function freshWaterDistance(e: number, n: number): number {
 
 /** Uncarved land height - the shape of the land before water cuts into it. */
 export function naturalHeight(e: number, n: number): number {
-  const rc = Math.hypot(e - CIRCLE.e, n - CIRCLE.n);
-  const urban = smoothstep(380, 850, rc);
+  // Flat-ish city core (Downtown + Midtown sit around (150, -400)).
+  const rc = Math.hypot((e - 150) * 0.8, n + 400);
+  const urban = smoothstep(420, 900, rc);
   let h = 3 + (1.5 + 13 * urban) * fbm(e / 320 + 5, n / 320 - 3);
   h += smoothstep(280, 950, n) * 20 * (0.6 + 0.4 * fbm(e / 210, n / 210));
   const dm2 = (e - MOUNTAIN.e) ** 2 + (n - MOUNTAIN.n) ** 2;
@@ -294,6 +296,8 @@ export class World {
   readonly spawn: { x: number; z: number; heading: number };
   readonly parkPoly: V2[];
   readonly islandR = CIRCLE.island;
+  private parkEN = PARK_POLY.map(([e, n]) => ({ x: e, z: n }));
+  private districtPolys = DISTRICT_POLYS.map(([d, poly]) => [d, poly.map(([e, n]) => ({ x: e, z: n }))] as const);
   readonly circle: V2;
   private nextId = 1;
   private reserved: Region[] = [];
@@ -336,13 +340,13 @@ export class World {
       this.jackSpots.push({ id: d.id, carId: d.carId, color: d.color, where: `${DISTRICT_NAMES[this.districtAtEN(-p.x, p.z) as District] ?? "Fairbay"} - ${r.name}`, ...p });
       this.reserved.push({ p: { x: p.x, z: p.z }, r: 9 });
     }
-    const spawnRoad = this.net.road("bay-1");
-    const sp = this.net.pointOn("bay-1", spawnRoad.s0 + 30, spawnRoad.laneOffset(1));
+    const spawnRoad = this.net.road("main-5");
+    const sp = this.net.pointOn("main-5", spawnRoad.s0 + 25, spawnRoad.laneOffset(1));
     this.spawn = { x: sp.x, z: sp.z, heading: sp.heading };
 
     this.buildRamps();
     // The roundabout island (fountain): a solid kerbed disc.
-    this.circleCollider(this.circle.x, this.circle.z, this.islandR - 0.6, 3, this.net.nodes.get("rb-A")!.elev, false);
+    this.circleCollider(this.circle.x, this.circle.z, this.islandR - 0.6, 3, this.net.nodes.get("rb-N")!.elev, false);
     if (!opts.bare) {
       this.buildBarriers();
       this.buildBuildings(rng);
@@ -365,6 +369,8 @@ export class World {
     if (!near) return nat;
     const r = near.road;
     if (r.isBridge(near.s)) return nat;
+    // A road surface well above the ground (approach embankment of an
+    // overpass) gets a sloped embankment; deck spans keep the ground.
     const roadH = r.heightAt(near.s) + (r.sidewalk > 0 ? CURB : 0);
     const d = near.dist - r.hw;
     const w = smoothstep(r.sidewalk + 2, r.sidewalk + 34, d);
@@ -403,20 +409,48 @@ export class World {
   }
 
   /** Driving surface height at (x, z). */
-  ground = (x: number, z: number): number => {
+  /**
+   * Driving surface height at (x, z). Where roads are stacked (an overpass
+   * above a street) `y` - the height of the thing asking - picks the deck it
+   * is on: a car on the viaduct stays on it, a car below drives underneath.
+   */
+  ground = (x: number, z: number, y?: number): number => {
     const ramp = this.rampHeight(x, z);
     let g: number;
     const node = this.net.nodeAt(x, z);
-    if (node) g = node.elev;
-    else {
-      const r = this.net.roadAt(x, z);
-      if (r) g = r.road.heightAt(r.s);
-      else {
-        const sw = this.net.roadAt(x, z, 4.2);
-        if (sw && sw.road.sidewalk > 0 && !sw.road.isBridge(sw.s)) g = sw.road.heightAt(sw.s) + CURB;
-        else if (sw && sw.road.isBridge(sw.s) && Math.abs(sw.lat) < sw.road.hw + sw.road.sidewalk) g = sw.road.heightAt(sw.s) + CURB;
-        else g = this.terrainAt(x, z);
+    const r = this.net.roadAt(x, z, 0, y);
+    // Inside a junction disc that a road still runs through (the road's own
+    // profile is continuous there), follow the road; only open junction
+    // surface away from every carriageway uses the flat junction height.
+    if (node && !r) g = node.elev;
+    else if (node && r && y !== undefined && Math.abs(node.elev - y) + 0.5 < Math.abs(r.road.heightAt(r.s) - y)) g = node.elev;
+    else if (r) {
+      g = r.road.heightAt(r.s);
+      // Where carriageways overlap (a slip road peeling off a highway), blend
+      // the surfaces by how far inside each one the point is - no seams.
+      const other = this.net.roadAt(x, z, -0.01, g);
+      const all = this.net.roadsAt(x, z);
+      if (all.length > 1) {
+        let wsum = 0;
+        let hsum = 0;
+        for (const o of all) {
+          const h = o.road.heightAt(o.s);
+          if (Math.abs(h - g) > 1.2) continue; // a different level
+          const w = Math.max(0.001, o.road.hw - Math.abs(o.lat));
+          wsum += w;
+          hsum += w * h;
+        }
+        if (wsum > 0) g = hsum / wsum;
       }
+      void other;
+    }
+    else {
+      const sw = this.net.roadAt(x, z, 4.2, y);
+      if (sw && sw.road.sidewalk > 0 && !sw.road.isBridge(sw.s)) g = sw.road.heightAt(sw.s) + CURB;
+      else if (sw && sw.road.isBridge(sw.s) && Math.abs(sw.lat) < sw.road.hw + sw.road.sidewalk) g = sw.road.heightAt(sw.s) + CURB;
+      else g = this.terrainAt(x, z);
+      // Under a deck you are on the terrain, not up on the bridge.
+      if (sw && y !== undefined && g > y + 1.5) g = this.terrainAt(x, z);
     }
     if (ramp) return Math.max(g, ramp.base + ramp.h);
     return g;
@@ -446,18 +480,12 @@ export class World {
   districtAtEN(e: number, n: number): District | "sea" | "river" {
     if (n < coastN(e)) return "sea";
     if (freshWaterDistance(e, n) < 0) return "river";
-    const rc = Math.hypot(e - CIRCLE.e, n - CIRCLE.n);
-    if (pointInPolygon(e, n, PARK_POLY.map(([pe, pn]) => ({ x: pe, z: pn })))) return "park";
-    if (rc < 285) return "downtown";
-    if (rc < 560) return "midtown";
+    if (pointInPolygon(e, n, this.parkEN)) return "park";
     const dm = Math.hypot(e - MOUNTAIN.e, n - MOUNTAIN.n);
-    if (dm < 470 || (e < -780 && n > 400)) return "highlands";
+    if (dm < 420 || (e < -800 && n > 420)) return "highlands";
     if (e < riverEastingAt(n) - RIVER_HALF) return "westside";
-    if (n > 520 && e > -150) return "oldtown";
-    if (n > 380 && e <= -150) return "hillcrest";
-    if (e > 560 && n > -600) return "ironworks";
-    if (n < -600 && e > 240) return "port";
-    if (n < -620) return "beach";
+    for (const [d, poly] of this.districtPolys) if (pointInPolygon(e, n, poly)) return d;
+    if (n > 600) return "hillcrest";
     return "southside";
   }
 
@@ -602,7 +630,7 @@ export class World {
   private buildBuildings(rng: () => number): void {
     const roads = [...this.net.roads].sort((a, b) => b.hw - a.hw); // wide roads claim frontage first
     for (const r of roads) {
-      if (r.cls === "freeway" || r.cls === "mountain" || r.cls === "ring") continue;
+      if (r.cls === "freeway" || r.cls === "mountain" || r.cls === "ring" || r.cls === "ramp" || r.cls === "runway") continue;
       for (const side of [1, -1] as const) {
         for (let row = 0; row < 2; row++) {
           let s = r.s0 + 4 + rng() * 6;
@@ -647,7 +675,8 @@ export class World {
     let hi = -Infinity;
     for (const p of obbCorners(box)) hi = Math.max(hi, this.terrainAt(p.x, p.z));
     const lift = hi - base;
-    const rc = Math.hypot(box.cx - this.circle.x, box.cz - this.circle.z);
+    // Tallest towers in the heart of Downtown, by the bay.
+    const rc = Math.hypot(-box.cx - 140, box.cz + 650);
     if (d === "ironworks" && rng() < 0.35) {
       this.tankFarm(box, rng);
       return;
@@ -885,8 +914,7 @@ export class World {
       const d = this.districtOf(x, z);
       let p = density[d] ?? 0;
       // Open countryside (outside the districts' cores) gets light woodland.
-      const rc = Math.hypot(x - this.circle.x, z - this.circle.z);
-      if (d === "southside" && rc > 700) p = 0.3;
+      if (d === "southside" && (z > 0 || -x < -600)) p = 0.3;
       if (rng() > p * (0.35 + 0.65 * fbm(x / 140, z / 140))) continue;
       const pine = d === "highlands" || (d === "hillcrest" && rng() < 0.4) || this.terrainAt(x, z) > 45;
       this.tryTree(x, z, rng, pine);

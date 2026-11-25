@@ -21,10 +21,10 @@ try {
   for (let i = 0; i < 6; i++) {
     const id = await page.evaluate(() => window.__fh.car.def.id);
     // Fixed 3/4 front angle for comparable shots.
-    await page.evaluate(() => (window.__fh.titleAngle = 0.75));
+    await page.evaluate(() => (window.__fh.titleAngle = 0.55));
     await new Promise((r) => setTimeout(r, 250));
     await page.screenshot({ path: join(out, `car-${id}-front.png`) });
-    await page.evaluate(() => (window.__fh.titleAngle = 2.5));
+    await page.evaluate(() => (window.__fh.titleAngle = 2.6));
     await new Promise((r) => setTimeout(r, 250));
     await page.screenshot({ path: join(out, `car-${id}-rear.png`) });
     await press(page, "ArrowRight", 400);

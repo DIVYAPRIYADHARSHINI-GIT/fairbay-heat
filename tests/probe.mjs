@@ -38,16 +38,18 @@ try {
   await page.screenshot({ path: join(out, "02-bay-street.png") });
 
   const shots = [
-    ["03-roundabout", "ring-DC", 0.3, 0, 13],
-    ["04-downtown-avenue", "mkt-1", 0.1, 1, 15],
-    ["05-freeway", "fw-2", 0.3, 1, 11],
-    ["06-bridge", "bridge-n", 0.15, 0, 17.5],
-    ["07-mountain", "mt-up", 0.55, 0, 10],
-    ["08-coast", "coast-2", 0.25, 0, 18.6],
-    ["09-oldtown", "cath", 0.3, 0, 9],
-    ["10-port", "hfront", 0.4, 0, 14],
-    ["11-hillcrest", "hc-1", 0.4, 0, 16],
-    ["12-night-downtown", "lib-1", 0.1, 0, 22],
+    ["03-roundabout", "ring-NW", 0.3, 0, 13],
+    ["04-downtown", "main-5", 0.15, 1, 15],
+    ["05-interstate", "i9-2", 0.25, 1, 11],
+    ["06-frontage-under-viaduct", "sf-2", 0.3, 1, 12],
+    ["07-onramp", "ramp-x2-eb", 0.1, 0, 10],
+    ["08-bridge", "i9-1", 0.55, 1, 17.5],
+    ["09-mountain", "mt-up", 0.55, 0, 10],
+    ["10-coast", "coast-w", 0.4, 0, 18.6],
+    ["11-oldtown", "queen", 0.3, 0, 9],
+    ["12-port", "baydr", 0.4, 0, 14],
+    ["13-airfield", "runway", 0.2, 0, 16],
+    ["14-night-downtown", "main-5", 0.15, 0, 22],
   ];
   for (const [name, road, t, lane, hours] of shots) {
     await onRoad(road, t, lane, hours);
@@ -57,7 +59,7 @@ try {
     console.log(name, { district: s.district, traffic: s.traffic, fps: Math.round(s.fps), y: s.y.toFixed(1), speed: Math.round(s.speedKmh) });
   }
   await press(page, "Tab", 500);
-  await page.screenshot({ path: join(out, "13-map.png") });
+  await page.screenshot({ path: join(out, "15-map.png") });
   await press(page, "Tab", 300);
   const s = await snap(page);
   console.log({ fps: s.fps, drawCalls: s.drawCalls, tris: s.triangles, errors: s.errors });

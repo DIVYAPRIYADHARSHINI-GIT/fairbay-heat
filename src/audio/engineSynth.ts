@@ -18,7 +18,7 @@
  *     banks merge into a tail pipe (another waveguide) and a muffler
  *     (low-pass whose cut-off opens with throttle).
  *  3. Intake roar, valvetrain/mechanical noise, a turbo whistle that spools
- *     with lag and a blow-off valve "pssh" when the throttle snaps shut,
+ *     with lag (no blow-off hiss),
  *     overrun pops and crackles, and a rev limiter that cuts ignition in
  *     bursts.
  *
@@ -95,9 +95,6 @@ export class EngineSynth {
   // turbo
   boost = 0;
   turboPhase = 0;
-  bov = 0;
-  bovBp: number[] = [0, 0];
-  flutter = 0;
   prevLoad = 0;
   // crackle
   pop = 0;
@@ -276,33 +273,12 @@ export class EngineSynth {
         const want = load > 0.5 ? Math.min(1, Math.max(0, (revFrac - 0.25) / 0.45)) : 0;
         const spool = want > this.boost ? 1 / (0.75 * sr) : 1 / (0.25 * sr);
         this.boost += (want - this.boost) * spool * 6;
-        // Blow-off valve: the throttle (target, not the smoothed load) snapping shut under boost.
-        if (this.prevLoad > 0.6 && this.tLoad < 0.3 && this.boost > 0.45) {
-          this.bov = this.boost;
-          this.flutter = this.boost * 0.6;
-        }
+        // (No blow-off valve / compressor flutter: on gear changes it sounded
+        // like an air-brake hiss. The turbo whistle alone carries the boost.)
         const wf = 2400 + 7200 * this.boost;
         this.turboPhase += wf / sr;
         if (this.turboPhase > 1) this.turboPhase -= 1;
-        s += Math.sin(this.turboPhase * Math.PI * 2) * this.boost * this.boost * 0.05 * Math.min(2, sp.turbos);
-        if (this.bov > 0.002) {
-          const nz = this.rand() * 2 - 1;
-          const f = 2600;
-          const q = 2 * Math.sin((Math.PI * f) / sr);
-          const low = this.bovBp[0] + q * this.bovBp[1];
-          const high = nz - low - 0.9 * this.bovBp[1];
-          const band = q * high + this.bovBp[1];
-          this.bovBp[0] = low;
-          this.bovBp[1] = band;
-          s += band * this.bov * 0.9;
-          this.bov *= 1 - 3.5 / sr;
-        }
-        if (this.flutter > 0.002) {
-          // Compressor surge "flutter": chopped low noise at ~22 Hz.
-          const chop = Math.sin(this.turboPhase * 0 + (i / sr) * Math.PI * 2 * 22) > 0.3 ? 1 : 0.2;
-          s += (this.rand() * 2 - 1) * this.flutter * 0.12 * chop;
-          this.flutter *= 1 - 5 / sr;
-        }
+        s += Math.sin(this.turboPhase * Math.PI * 2) * this.boost * this.boost * 0.035 * Math.min(2, sp.turbos);
       }
       this.prevLoad = this.tLoad;
 

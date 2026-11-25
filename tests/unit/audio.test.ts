@@ -110,20 +110,56 @@ describe("engine synthesiser", () => {
     expect(env(true)).toBeGreaterThan(env(false) * 1.5);
   });
 
-  it("turbo cars whistle when boosted and blow off when the throttle snaps shut", () => {
+  it("turbo cars spool up a whistle under boost (naturally aspirated cars do not)", () => {
     const e = carById("gtarr").handling.engine;
     const s = new EngineSynth(SR, e, 9);
     const buf = new Float32Array(SR * 2);
     s.set({ rpm: e.redline * 0.8, load: 1, limiter: false, gain: 1 });
     s.render(buf);
     expect(s.boost).toBeGreaterThan(0.6);
-    s.set({ rpm: e.redline * 0.8, load: 0, limiter: false, gain: 1 });
-    s.render(new Float32Array(Math.round(SR * 0.08)));
-    expect(s.bov).toBeGreaterThan(0.2);
     const na = new EngineSynth(SR, carById("carrara").handling.engine, 9);
     na.set({ rpm: 6000, load: 1, limiter: false, gain: 1 });
     na.render(buf);
     expect(na.boost).toBe(0);
+  });
+
+  it("gear changes make no hiss: high-frequency energy does not jump after an upshift", async () => {
+    const { CarPhysics, NO_CONTROLS } = await import("../../src/game/physics");
+    const { SpatialHash } = await import("../../src/game/collision");
+    for (const def of CARS) {
+      const car = new CarPhysics(def);
+      const w = { ground: () => 0, surface: () => "road" as const, colliders: new SpatialHash() };
+      const syn = new EngineSynth(SR, def.handling.engine, 3);
+      const blk = Math.round(SR / 120);
+      const buf = new Float32Array(blk);
+      let hp = 0;
+      let px = 0;
+      const hf: number[] = [];
+      const shifts: number[] = [];
+      let g = car.gear;
+      for (let t = 0; t < 10; t += 1 / 120) {
+        car.step(1 / 120, { ...NO_CONTROLS, throttle: 1 }, w);
+        syn.set({ rpm: car.rpm, load: car.load, limiter: car.limiter, gain: 1 });
+        syn.render(buf);
+        let e = 0;
+        for (const x of buf) {
+          hp = 0.7 * (hp + x - px);
+          px = x;
+          e += hp * hp;
+        }
+        hf.push(Math.sqrt(e / blk));
+        if (car.gear !== g) {
+          shifts.push(hf.length - 1);
+          g = car.gear;
+        }
+      }
+      expect(shifts.length, def.id).toBeGreaterThan(1);
+      for (const i of shifts) {
+        const after = Math.max(...hf.slice(i, i + 30));
+        const before = Math.max(...hf.slice(i - 30, i));
+        expect(after / before, `${def.id} shift @${i}`).toBeLessThan(1.45);
+      }
+    }
   });
 
   it("lifting off at high revs makes overrun crackles on cars tuned for it", () => {

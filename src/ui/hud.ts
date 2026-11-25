@@ -157,9 +157,10 @@ export class Hud {
       }
     };
     stroke(3, "rgba(0,0,0,0.55)", () => true);
-    stroke(0, "#8a919c", (r) => r.cls !== "freeway" && r.cls !== "mountain" && r.cls !== "coast");
+    stroke(0, "#8a919c", (r) => r.cls !== "freeway" && r.cls !== "ramp" && r.cls !== "service" && r.cls !== "mountain" && r.cls !== "coast");
     stroke(0, "#b39a63", (r) => r.cls === "mountain" || r.cls === "coast");
-    stroke(0, "#d9a441", (r) => r.cls === "freeway");
+    stroke(0, "#d9a441", (r) => r.cls === "freeway" || r.cls === "ramp");
+    stroke(0, "#a4abb5", (r) => r.cls === "service");
     // Junction discs.
     for (const n of this.city.net.nodes.values()) {
       if (n.kind === "roundabout") continue;
@@ -189,17 +190,22 @@ export class Hud {
     g.font = "600 15px system-ui, sans-serif";
     g.textAlign = "center";
     g.fillStyle = "rgba(255,255,255,0.55)";
+    // Labels at (x, z) world positions (x = -east).
     const labels: [string, number, number][] = [
-      ["DOWNTOWN", -120, 140],
-      ["OLD TOWN", -330, 820],
-      ["HILLCREST", 300, 560],
-      ["IRONWORKS", -820, -80],
-      ["PORT FAIRBAY", -620, -720],
-      ["SUNSET BEACH", 300, -800],
-      ["WESTSIDE", 1040, -100],
-      ["MOUNT CALDER", 880, 1080],
-      ["CENTRAL PARK", 60, 410],
-      ["SOUTHSIDE", 60, -470],
+      ["DOWNTOWN", -130, -700],
+      ["MIDTOWN", -100, -330],
+      ["OLD TOWN", -150, 300],
+      ["CENTRAL PARK", -250, 280],
+      ["HILLCREST", 450, 450],
+      ["AIRFIELD", -760, 920],
+      ["IRONWORKS", -860, -280],
+      ["PORT FAIRBAY", -780, -720],
+      ["SUNSET BEACH", 420, -870],
+      ["SOUTHSIDE", 420, -600],
+      ["WESTSIDE", 1030, -250],
+      ["MOUNT CALDER", 860, 1100],
+      ["I-9", 200, -60],
+      ["RT 7", -860, -480],
     ];
     for (const [t, x, z] of labels) {
       const [px, py] = Hud.toMap(x, z);

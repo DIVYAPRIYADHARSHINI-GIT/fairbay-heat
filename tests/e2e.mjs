@@ -79,7 +79,7 @@ try {
 
   section("Driving with W A S D");
   // A long, nearly straight stretch of the Fairbay Loop with traffic paused.
-  await onRoad("fw-5", 0.05, 1);
+  await onRoad("i9-2", 0.22, 1);
   s = await snap(page);
   const x0 = s.x;
   const z0 = s.z;
@@ -109,7 +109,7 @@ try {
   check("keeping S held reverses (gear R)", s.vLong < -2 && s.gear === 0, `vLong=${s.vLong.toFixed(2)} gear=${s.gear}`);
   await holdSim(page, ["KeyW"], 0.6);
 
-  await onRoad("fw-5", 0.05, 1);
+  await onRoad("i9-2", 0.22, 1);
   await holdSim(page, ["KeyW"], 2);
   const h0 = (await snap(page)).heading;
   await holdSim(page, ["KeyW", "KeyA"], 0.7);
@@ -121,7 +121,7 @@ try {
   check("W + D turns right (heading decreases)", s.heading - h1 < -0.25, `dHeading=${(s.heading - h1).toFixed(2)}`);
 
   section("Arrow keys work the same");
-  await onRoad("fw-5", 0.05, 1);
+  await onRoad("i9-2", 0.22, 1);
   await holdSim(page, ["ArrowUp"], 2);
   s = await snap(page);
   check("ArrowUp accelerates", s.speedKmh > 40, `${s.speedKmh.toFixed(1)}`);
@@ -133,7 +133,7 @@ try {
   check("ArrowDown brakes", (await snap(page)).speedKmh < 5);
 
   section("Handbrake drift and nitro");
-  await onRoad("fw-5", 0.05, 1);
+  await onRoad("i9-2", 0.22, 1);
   await holdSim(page, ["KeyW"], 3.5);
   await page.evaluate(() => (window.__fh.car.nitro = 0.3));
   await holdSim(page, ["KeyW", "KeyA", "Space"], 0.4);
@@ -146,7 +146,7 @@ try {
   const drift = await page.$eval(".drift", (e) => ({ show: e.classList.contains("show"), text: e.textContent }));
   check("the drift counter shows on screen", drift.show && /DRIFT [0-9]/.test(drift.text), drift.text);
   await brakeToStop(page);
-  await onRoad("fw-5", 0.05, 1);
+  await onRoad("i9-2", 0.22, 1);
   await page.evaluate(() => (window.__fh.car.nitro = 1));
   await holdSim(page, ["KeyW"], 1);
   await page.keyboard.down("KeyW");
@@ -350,7 +350,7 @@ try {
 
 
   section("Realistic engine sound (Web Audio, synthesised)");
-  await onRoad("fw-5", 0.05, 1);
+  await onRoad("i9-2", 0.22, 1);
   await page.waitForFunction(() => window.__fh.audio.ready, { timeout: 15000 }).catch(() => {});
   s = await snap(page);
   check("audio started on the first key press", s.audioState === "running", s.audioState);
@@ -384,7 +384,7 @@ try {
     window.__fh.env.setHours(13);
     window.__fh.env.speed = 0;
   });
-  await onRoad("mkt-1", 0.3, 0, true);
+  await onRoad("kings-2", 0.3, 0, true);
   await waitSim(page, 3);
   s = await snap(page);
   check("traffic populates around the player", s.traffic >= 40, `${s.traffic} cars`);
@@ -457,18 +457,43 @@ try {
     const g = window.__fh;
     return { roads: g.city.net.roads.length, km: g.city.net.roads.reduce((a, r) => a + r.length, 0) / 1000, roundabout: [...g.city.net.nodes.values()].some((n) => n.kind === "roundabout"), bridges: g.city.net.roads.filter((r) => r.bridges.length).length, summit: g.city.net.nodes.get("SU").elev };
   });
-  check("the city is a hand-made road network (no grid)", mapInfo.roads > 60 && mapInfo.km > 20, `${mapInfo.roads} roads, ${mapInfo.km.toFixed(1)} km`);
+  check("the city is a hand-made road network (no grid)", mapInfo.roads > 120 && mapInfo.km > 25, `${mapInfo.roads} roads, ${mapInfo.km.toFixed(1)} km`);
   check("it has a roundabout, river bridges and a mountain pass", mapInfo.roundabout && mapInfo.bridges >= 2 && mapInfo.summit > 100);
+  const hw = await page.evaluate(() => {
+    const g = window.__fh;
+    const c = (k) => g.city.net.roads.filter((r) => r.cls === k).length;
+    return { freeway: c("freeway"), ramp: c("ramp"), service: c("service"), overpasses: g.city.net.overpassCount };
+  });
+  check("it has highways, on/off ramps, service roads and overpasses", hw.freeway >= 6 && hw.ramp >= 4 && hw.service >= 8 && hw.overpasses >= 4, JSON.stringify(hw));
   await onRoad("mt-up", 0.7, 0);
   await holdSim(page, ["KeyW"], 2.5);
   s = await snap(page);
   check("you can drive up the mountain pass", s.y > 60 && s.speedKmh > 20, `y=${s.y.toFixed(1)} ${s.speedKmh.toFixed(0)} km/h`);
   await shot("19-mountain");
   await brakeToStop(page);
-  await onRoad("bridge-n", 0.5, 0);
+  const bridge = await page.evaluate(() => {
+    const g = window.__fh;
+    const r = g.city.net.road("i9-1");
+    const [b0, b1] = r.bridges[0];
+    return { id: r.id, t: ((b0 + b1) / 2 - r.s0) / (r.s1 - r.s0) };
+  });
+  await onRoad(bridge.id, bridge.t, 1);
   s = await snap(page);
-  const overWater = await page.evaluate((p) => window.__fh.city.isWater(p.x + 30, p.z) || window.__fh.city.isWater(p.x - 30, p.z), { x: s.x, z: s.z });
-  check("the Riverside Bridge crosses the river", overWater && s.y > 0);
+  const overWater = await page.evaluate((p) => [-40, -25, 25, 40].some((d) => window.__fh.city.isWater(p.x + d, p.z) || window.__fh.city.isWater(p.x, p.z + d)), { x: s.x, z: s.z });
+  check("Interstate 9 crosses the Fair River on a bridge", overWater && s.y > 0);
+  // Drive the elevated viaduct, then the frontage road underneath it.
+  // Mid-span of the viaduct, directly over the frontage road.
+  await onRoad("i9-2", 0.4, 1);
+  await holdSim(page, ["KeyW"], 1.2);
+  const top = await snap(page);
+  await brakeToStop(page);
+  await onRoad("sf-2", 0.4, 1);
+  await holdSim(page, ["KeyW"], 1.2);
+  const below = await snap(page);
+  await shot("20-under-viaduct");
+  check("the I-9 viaduct runs above the Midtown frontage road", top.y - below.y > 5, `deck ${top.y.toFixed(1)} m vs street ${below.y.toFixed(1)} m`);
+  check("you stay on your own level (viaduct vs underneath) and keep driving", below.speedKmh > 20 && top.speedKmh > 20 && top.y > 10, `deck ${top.speedKmh.toFixed(0)} km/h, street ${below.speedKmh.toFixed(0)} km/h`);
+  await brakeToStop(page);
 
   section("Settings + persistence");
   await press(page, "Escape", 300);
@@ -480,6 +505,12 @@ try {
   check("Left arrow lowers graphics quality", (await snap(page)).quality === "medium");
   await press(page, "ArrowRight", 600);
   check("...and Right raises it again", (await snap(page)).quality === "high");
+  for (let i = 0; i < 5; i++) await press(page, "ArrowDown", 60);
+  const sens0 = await page.evaluate(() => window.__fh.save.steering);
+  await press(page, "ArrowRight", 200);
+  const sens1 = await page.evaluate(() => [window.__fh.save.steering, window.__fh.car.sensitivity]);
+  check("steering sensitivity can be raised in Settings and applies to the car", sens1[0] > sens0 && sens1[1] === sens1[0], `${sens0} -> ${sens1[0]} (car ${sens1[1]})`);
+  await press(page, "ArrowLeft", 200);
   await press(page, "Escape", 200);
   await press(page, "Escape", 300);
   check("back out to driving", (await snap(page)).state === "drive");
@@ -500,11 +531,50 @@ try {
     window.__fh.env.setHours(22);
     window.__fh.env.speed = 0;
   });
-  await onRoad("lib-1", 0.1, 0, true);
+  await onRoad("main-5", 0.15, 0, true);
   await page.evaluate(() => {});
   await holdSim(page, ["KeyW"], 2.5);
   s = await snap(page);
   check("night mode is active at 22:00", s.night > 0.9);
+  // Night glare: right behind a traffic car and facing a wall, the view
+  // ahead must not wash out to white.
+  const glare = async () => {
+    const b64 = await page.screenshot({ encoding: "base64", clip: { x: 360, y: 250, width: 720, height: 300 } });
+    return page.evaluate(async (b64) => {
+      const img = new Image();
+      img.src = "data:image/png;base64," + b64;
+      await img.decode();
+      const c = document.createElement("canvas");
+      c.width = img.width;
+      c.height = img.height;
+      const g = c.getContext("2d");
+      g.drawImage(img, 0, 0);
+      const d = g.getImageData(0, 0, c.width, c.height).data;
+      let white = 0;
+      for (let i = 0; i < d.length; i += 4) if (0.2126 * d[i] + 0.7152 * d[i + 1] + 0.0722 * d[i + 2] > 235) white++;
+      return white / (d.length / 4);
+    }, b64);
+  };
+  await page.evaluate(() => {
+    const g = window.__fh;
+    const c = g.traffic.cars.filter((k) => k.seg.kind === "lane" && k.s > 20 && k.model.kind !== "bus")[0];
+    g.traffic.enabled = false;
+    const p = c.seg.poly.sample(c.s - 6.5);
+    g.teleport(p.x, p.z, Math.atan2(c.x - p.x, c.z - p.z));
+  });
+  await waitSim(page, 0.5);
+  const gA = await glare();
+  await shot("21-night-behind-traffic");
+  await page.evaluate(() => {
+    const g = window.__fh;
+    const b = g.city.buildings.filter((x) => x.district === "downtown" && x.box.hx > 12)[0];
+    const { cx, cz, hz, c, s } = b.box;
+    g.teleport(cx + s * (hz + 9), cz - c * (hz + 9), Math.atan2(-s, c));
+  });
+  await waitSim(page, 0.5);
+  const gB = await glare();
+  check("night headlights never white out the view (behind traffic / facing a wall)", gA < 0.08 && gB < 0.08, `white ${(gA * 100).toFixed(1)}% / ${(gB * 100).toFixed(1)}%`);
+  await page.evaluate(() => (window.__fh.traffic.enabled = true));
   await shot("16-night");
   await brakeToStop(page);
   const f0 = await page.evaluate(() => window.__fh.frames);
@@ -515,7 +585,12 @@ try {
   const fps = ((await page.evaluate(() => window.__fh.frames)) - f0) / ((Date.now() - t0) / 1000);
   const gpu = !/SwiftShader/i.test(info.gl);
   console.log(`  (measured ${fps.toFixed(1)} fps at 1440x900 on ${gpu ? "GPU" : "software GL"}, ${s.drawCalls} draw calls)`);
-  if (gpu) check("holds >= 50 fps while driving at 1440x900", fps >= 50, `${fps.toFixed(1)} fps`);
+  // The browser may be capped below 60 Hz (e.g. macOS Low Power Mode on
+  // battery caps requestAnimationFrame at 30). Measure the cap with an empty
+  // rAF loop and require the game to hold >= 85% of it.
+  const cap = await page.evaluate(() => new Promise((res) => { let n = 0; const t0 = performance.now(); const f = () => { n++; if (performance.now() - t0 < 2000) requestAnimationFrame(f); else res(n / ((performance.now() - t0) / 1000)); }; requestAnimationFrame(f); }));
+  console.log(`  (display refresh cap measured at ${cap.toFixed(0)} Hz)`);
+  if (gpu) check("holds the display's full frame rate while driving (>= 85% of the refresh cap)", fps >= cap * 0.85, `${fps.toFixed(1)} fps of ${cap.toFixed(0)} Hz`);
   else check("runs on software GL without stalling (>= 5 fps)", fps >= 5, `${fps.toFixed(1)} fps`);
 
   section("Console");

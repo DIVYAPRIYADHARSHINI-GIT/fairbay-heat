@@ -136,6 +136,61 @@ describe("steering", () => {
   });
 });
 
+describe("per-car steering feel", () => {
+  /** Time (s) for the steering to reach 90% lock after pressing A at 60 km/h. */
+  const windUp = (id: string, sens = 1) => {
+    const car = new CarPhysics(carById(id));
+    car.sensitivity = sens;
+    const w = flatWorld();
+    timeTo(car, w, 60);
+    let t = 0;
+    while (car.steer < 0.9 && t < 3) {
+      car.step(DT, ctl({ throttle: 0.4, steer: 1 }), w);
+      t += DT;
+    }
+    return t;
+  };
+  /** Turning radius (m) at full lock at 30 km/h. */
+  const radius = (id: string) => {
+    const car = new CarPhysics(carById(id));
+    const w = flatWorld();
+    timeTo(car, w, 30);
+    run(car, w, ctl({ throttle: 0.15, steer: 1 }), 2);
+    return car.speed / Math.max(1e-3, Math.abs(car.yawRate));
+  };
+
+  it("every car steers differently: wind-up time spans at least 2x across the line-up", () => {
+    const times = CARS.map((c) => windUp(c.id));
+    expect(Math.max(...times) / Math.min(...times)).toBeGreaterThan(1.8);
+    // The supercar is twitchier than the muscle car.
+    expect(windUp("aventura")).toBeLessThan(windUp("mustanger") * 0.6);
+  });
+
+  it("turning circles differ (the Porsa turns tighter than the Bugarri)", () => {
+    expect(radius("carrara")).toBeLessThan(radius("veyrone") * 0.9);
+  });
+
+  it("the steering sensitivity setting speeds up / slows down the steering", () => {
+    expect(windUp("gtarr", 1.5)).toBeLessThan(windUp("gtarr", 1) * 0.75);
+    expect(windUp("gtarr", 0.6)).toBeGreaterThan(windUp("gtarr", 1) * 1.4);
+  });
+
+  it("the loose-rear muscle car breaks into power oversteer more easily than the planted AWD hypercar", () => {
+    const kick = (id: string) => {
+      const car = new CarPhysics(carById(id));
+      const w = flatWorld();
+      timeTo(car, w, 75);
+      let t = 0;
+      while (!car.drifting && t < 4) {
+        car.step(DT, ctl({ throttle: 1, steer: 1 }), w);
+        t += DT;
+      }
+      return t;
+    };
+    expect(kick("mustanger")).toBeLessThan(kick("veyrone"));
+  });
+});
+
 describe("drifting", () => {
   it("handbrake + steer at speed starts a drift with a big slip angle that refills nitro", () => {
     const car = new CarPhysics(carById("mustanger"));

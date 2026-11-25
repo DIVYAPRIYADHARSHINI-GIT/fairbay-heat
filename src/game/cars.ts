@@ -44,6 +44,31 @@ export interface BodySpec {
   slimLights?: boolean;
   sideIntakes?: boolean;
   quadExhaust?: boolean;
+  /** Signature detailing, matched to the real car each one is styled after. */
+  details: CarDetails;
+}
+
+export type HeadlightStyle = "round" | "swept" | "oval" | "y-slit" | "boomerang" | "horseshoe";
+export type TaillightStyle = "tribar" | "strip" | "ring" | "y" | "slim" | "band";
+export type GrilleStyle = "vane" | "mesh" | "none" | "hex" | "horseshoe" | "bar";
+export type RimStyle = "split5" | "turbine" | "y6" | "mesh10" | "star7" | "monoblock";
+
+export interface CarDetails {
+  headlight: HeadlightStyle;
+  taillight: TaillightStyle;
+  grille: GrilleStyle;
+  rim: RimStyle;
+  /** Rim finish colour. */
+  rimColor: string;
+  caliper: string;
+  /** Two-tone body: contrasting colour on the front half (Veyrone). */
+  twoTone?: string;
+  /** Front splitter / side skirt depth (0 = none). */
+  aero: number;
+  /** Visible roof scoop (Aventura). */
+  roofScoop?: boolean;
+  /** Wide rear haunches (911, Vantis). */
+  haunch?: number;
 }
 
 export interface Handling {
@@ -62,8 +87,31 @@ export interface Handling {
   /** Steering responsiveness, 1/s. */
   response: number;
   drive: Drive;
+  /** Steering feel - every car is different. */
+  steering: SteeringFeel;
   /** Engine character for the synthesised sound. */
   engine: EngineSpec;
+}
+
+/**
+ * How a car's steering feels on the keyboard:
+ *  - `lock`: front-wheel angle at full input at low speed (rad). Bigger =
+ *    tighter turning circle.
+ *  - `rate`: how fast the wheel winds on when you press A/D (1/s). Bigger =
+ *    twitchier / more immediate.
+ *  - `centre`: how fast it self-centres when you let go (1/s).
+ *  - `speedFalloff`: speed (m/s) at which lock has halved - lower means the
+ *    steering gets calmer sooner at speed (stable GT); higher keeps it sharp
+ *    (darty supercar).
+ *  - `rear`: rear-end looseness 0..1 - how readily throttle/lift swings the
+ *    tail out (power oversteer).
+ */
+export interface SteeringFeel {
+  lock: number;
+  rate: number;
+  centre: number;
+  speedFalloff: number;
+  rear: number;
 }
 
 /**
@@ -117,12 +165,12 @@ export const CARS: CarDef[] = [
       frontAxle: 0.31, rearAxle: -0.31,
       noseHeight: 0.62, cowlHeight: 0.86, tailHeight: 0.9,
       cabinRear: -0.36, roofRear: -0.16, roofFront: 0.05, cabinFront: 0.2,
-      tumblehome: 0.72, fenderFlare: 0.04, plan: 0.55, spoiler: "lip",
+      tumblehome: 0.72, fenderFlare: 0.04, plan: 0.55, spoiler: "lip", details: { headlight: "swept", taillight: "slim", grille: "vane", rim: "y6", rimColor: "#2b2e33", caliper: "#c8102e", aero: 0.4, haunch: 0.05 },
       sideIntakes: true,
     },
     handling: {
       zeroTo100: 4.2, topSpeed: 305, brake: 13, grip: 9, driftGrip: 2.4, cornering: 21,
-      response: 8, drive: "RWD", engine: { cylinders: 12, idle: 850, redline: 7000, banks: [[0, 2, 4, 6, 8, 10], [1, 3, 5, 7, 9, 11]], pipes: [0.9, 2.3], muffler: 2600, turbos: 0, crackle: 0.45, intake: 0.5, rough: 0.12 },
+      response: 8, drive: "RWD", steering: { lock: 0.56, rate: 5.5, centre: 8, speedFalloff: 24, rear: 0.45 }, engine: { cylinders: 12, idle: 850, redline: 7000, banks: [[0, 2, 4, 6, 8, 10], [1, 3, 5, 7, 9, 11]], pipes: [0.9, 2.3], muffler: 2600, turbos: 0, crackle: 0.45, intake: 0.5, rough: 0.12 },
     },
   },
   {
@@ -136,11 +184,11 @@ export const CARS: CarDef[] = [
       frontAxle: 0.27, rearAxle: -0.25,
       noseHeight: 0.6, cowlHeight: 0.84, tailHeight: 0.86,
       cabinRear: -0.44, roofRear: -0.12, roofFront: 0.04, cabinFront: 0.18,
-      tumblehome: 0.7, fenderFlare: 0.07, plan: 0.75, spoiler: "ducktail",
+      tumblehome: 0.7, fenderFlare: 0.07, plan: 0.75, spoiler: "ducktail", details: { headlight: "oval", taillight: "band", grille: "none", rim: "split5", rimColor: "#c7cbd0", caliper: "#e3b505", aero: 0.2, haunch: 0.08 },
     },
     handling: {
       zeroTo100: 4.3, topSpeed: 304, brake: 14, grip: 10, driftGrip: 2.6, cornering: 23,
-      response: 9, drive: "RWD", engine: { cylinders: 6, idle: 900, redline: 7800, banks: [[0, 2, 4], [1, 3, 5]], pipes: [0.6, 1.7], muffler: 3200, turbos: 0, crackle: 0.35, intake: 0.75, rough: 0.1, headerMismatch: 0.15 },
+      response: 9, drive: "RWD", steering: { lock: 0.6, rate: 8, centre: 11, speedFalloff: 26, rear: 0.6 }, engine: { cylinders: 6, idle: 900, redline: 7800, banks: [[0, 2, 4], [1, 3, 5]], pipes: [0.6, 1.7], muffler: 3200, turbos: 0, crackle: 0.35, intake: 0.75, rough: 0.1, headerMismatch: 0.15 },
     },
   },
   {
@@ -154,12 +202,12 @@ export const CARS: CarDef[] = [
       frontAxle: 0.29, rearAxle: -0.3,
       noseHeight: 0.8, cowlHeight: 0.98, tailHeight: 0.98,
       cabinRear: -0.32, roofRear: -0.12, roofFront: 0.04, cabinFront: 0.14,
-      tumblehome: 0.76, fenderFlare: 0.02, plan: 0.2, spoiler: "lip",
+      tumblehome: 0.76, fenderFlare: 0.02, plan: 0.2, spoiler: "lip", details: { headlight: "round", taillight: "tribar", grille: "mesh", rim: "star7", rimColor: "#1c1d20", caliper: "#c8102e", aero: 0.3 },
       hoodScoop: true, stripes: true, quadExhaust: true,
     },
     handling: {
       zeroTo100: 4.8, topSpeed: 250, brake: 11.5, grip: 7.5, driftGrip: 1.9, cornering: 19,
-      response: 7, drive: "RWD", engine: { cylinders: 8, idle: 750, redline: 6800, banks: [[0, 2, 3, 5], [1, 4, 6, 7]], pipes: [0.8, 2.6], muffler: 1500, turbos: 0, crackle: 0.55, intake: 0.35, rough: 0.3, headerMismatch: 0.3 },
+      response: 7, drive: "RWD", steering: { lock: 0.52, rate: 4.2, centre: 6.5, speedFalloff: 20, rear: 0.85 }, engine: { cylinders: 8, idle: 750, redline: 6800, banks: [[0, 2, 3, 5], [1, 4, 6, 7]], pipes: [0.8, 2.6], muffler: 1500, turbos: 0, crackle: 0.55, intake: 0.35, rough: 0.3, headerMismatch: 0.3 },
     },
   },
   {
@@ -173,12 +221,12 @@ export const CARS: CarDef[] = [
       frontAxle: 0.3, rearAxle: -0.28,
       noseHeight: 0.5, cowlHeight: 0.78, tailHeight: 0.9,
       cabinRear: -0.3, roofRear: -0.12, roofFront: 0.02, cabinFront: 0.3,
-      tumblehome: 0.6, fenderFlare: 0.06, plan: 0.3, spoiler: "wing",
+      tumblehome: 0.6, fenderFlare: 0.06, plan: 0.3, spoiler: "wing", details: { headlight: "y-slit", taillight: "y", grille: "hex", rim: "turbine", rimColor: "#18191b", caliper: "#f2c230", aero: 0.9, roofScoop: true },
       slimLights: true, sideIntakes: true, quadExhaust: false,
     },
     handling: {
       zeroTo100: 2.9, topSpeed: 350, brake: 15, grip: 11, driftGrip: 2.9, cornering: 25,
-      response: 9, drive: "AWD", engine: { cylinders: 12, idle: 1000, redline: 8500, banks: [[0, 2, 4, 6, 8, 10], [1, 3, 5, 7, 9, 11]], pipes: [0.7, 1.5], muffler: 3800, turbos: 0, crackle: 0.85, intake: 0.6, rough: 0.12 },
+      response: 9, drive: "AWD", steering: { lock: 0.5, rate: 9, centre: 12, speedFalloff: 30, rear: 0.3 }, engine: { cylinders: 12, idle: 1000, redline: 8500, banks: [[0, 2, 4, 6, 8, 10], [1, 3, 5, 7, 9, 11]], pipes: [0.7, 1.5], muffler: 3800, turbos: 0, crackle: 0.85, intake: 0.6, rough: 0.12 },
     },
   },
   {
@@ -192,12 +240,12 @@ export const CARS: CarDef[] = [
       frontAxle: 0.3, rearAxle: -0.3,
       noseHeight: 0.72, cowlHeight: 0.94, tailHeight: 1.0,
       cabinRear: -0.37, roofRear: -0.16, roofFront: 0.04, cabinFront: 0.18,
-      tumblehome: 0.74, fenderFlare: 0.03, plan: 0.25, spoiler: "wing",
+      tumblehome: 0.74, fenderFlare: 0.03, plan: 0.25, spoiler: "wing", details: { headlight: "boomerang", taillight: "ring", grille: "bar", rim: "mesh10", rimColor: "#3a3d42", caliper: "#2b59c3", aero: 0.6 },
       quadExhaust: true,
     },
     handling: {
       zeroTo100: 3.2, topSpeed: 315, brake: 14, grip: 11, driftGrip: 3.2, cornering: 24,
-      response: 9, drive: "AWD", engine: { cylinders: 6, idle: 900, redline: 7100, banks: [[0, 2, 4], [1, 3, 5]], pipes: [1.0, 2.4], muffler: 1700, turbos: 2, crackle: 0.25, intake: 0.4, rough: 0.08, headerMismatch: 0.12 },
+      response: 9, drive: "AWD", steering: { lock: 0.55, rate: 7, centre: 10, speedFalloff: 25, rear: 0.25 }, engine: { cylinders: 6, idle: 900, redline: 7100, banks: [[0, 2, 4], [1, 3, 5]], pipes: [1.0, 2.4], muffler: 1700, turbos: 2, crackle: 0.25, intake: 0.4, rough: 0.08, headerMismatch: 0.12 },
     },
   },
   {
@@ -211,12 +259,12 @@ export const CARS: CarDef[] = [
       frontAxle: 0.3, rearAxle: -0.28,
       noseHeight: 0.56, cowlHeight: 0.82, tailHeight: 0.95,
       cabinRear: -0.24, roofRear: -0.08, roofFront: 0.04, cabinFront: 0.27,
-      tumblehome: 0.62, fenderFlare: 0.08, plan: 0.85, spoiler: "lip",
+      tumblehome: 0.62, fenderFlare: 0.08, plan: 0.85, spoiler: "lip", details: { headlight: "horseshoe", taillight: "strip", grille: "horseshoe", rim: "monoblock", rimColor: "#d4d7db", caliper: "#c8102e", aero: 0.3, twoTone: "#1a1c20" },
       sideIntakes: true,
     },
     handling: {
       zeroTo100: 2.5, topSpeed: 407, brake: 15, grip: 10, driftGrip: 2.8, cornering: 24,
-      response: 8, drive: "AWD", engine: { cylinders: 16, idle: 900, redline: 6600, banks: [[0, 2, 4, 6, 8, 10, 12, 14], [1, 3, 5, 7, 9, 11, 13, 15]], pipes: [1.1, 2.8], muffler: 1400, turbos: 4, crackle: 0.15, intake: 0.35, rough: 0.06 },
+      response: 8, drive: "AWD", steering: { lock: 0.46, rate: 4.8, centre: 7.5, speedFalloff: 19, rear: 0.2 }, engine: { cylinders: 16, idle: 900, redline: 6600, banks: [[0, 2, 4, 6, 8, 10, 12, 14], [1, 3, 5, 7, 9, 11, 13, 15]], pipes: [1.1, 2.8], muffler: 1400, turbos: 4, crackle: 0.15, intake: 0.35, rough: 0.06 },
     },
   },
 ];

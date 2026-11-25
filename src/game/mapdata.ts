@@ -5,18 +5,25 @@
  * The game world uses x = -E, z = N (see `toWorld`), because heading 0 faces
  * +Z and a positive heading turns left towards +X.
  *
- *   - Fairbay Circle: a 6-exit roundabout at the heart of Downtown.
- *   - Six curving radial avenues, an inner "Crescent" street ring and an
- *     outer boulevard ring, so blocks are wedges and curves - not squares.
- *   - The Fairbay Loop freeway around everything, with 8 link roads.
- *   - Old Town and Hillcrest to the north, Ironworks east, the Port and
- *     Sunset Beach on the south coast, the Fair River to the west with two
- *     bridges to Westside, and a hairpin mountain road over Mount Calder.
+ * An asymmetric open-world layout in the spirit of GTA / NFS Most Wanted:
+ *   - Downtown towers on the waterfront of Fairbay Bay (south-centre).
+ *   - Interstate 9 crosses the map west-east on an ELEVATED VIADUCT through
+ *     Midtown, with one-way frontage (service) roads underneath on both
+ *     sides and on/off ramps at each end; Midtown avenues pass under it.
+ *   - Route 7 Bayshore Expressway runs north from the Port to I-9.
+ *   - The Coast Highway runs west along Sunset Beach, over the river mouth.
+ *   - Old Town (winding streets, a small roundabout square, Central Park),
+ *     Hillcrest suburbs, Ridge Parkway along the northern hills, the
+ *     Fairbay Airfield with a runway, Ironworks and the container Port.
+ *   - The Fair River with bridges to Westside, and the Calder Pass hairpins
+ *     over Mount Calder.
+ * Where a highway crosses a street without a junction, the road network
+ * automatically lifts the highway onto an overpass.
  */
 
 import type { V2 } from "../core/geom";
 
-export type RoadClass = "freeway" | "boulevard" | "avenue" | "street" | "mountain" | "coast" | "ring";
+export type RoadClass = "freeway" | "ramp" | "boulevard" | "avenue" | "street" | "service" | "mountain" | "coast" | "ring" | "runway";
 
 export interface RoadClassSpec {
   /** Lanes per direction (one-way roads use `lanes` in the forward direction only). */
@@ -44,6 +51,12 @@ export const ROAD_CLASSES: Record<RoadClass, RoadClassSpec> = {
   mountain: { lanes: 1, laneWidth: 3.7, median: 0.3, shoulder: 0.9, speed: 14, oneWay: false, sidewalk: false, barriers: false, rails: true, lamps: "none" },
   coast: { lanes: 1, laneWidth: 3.8, median: 0.4, shoulder: 2.2, speed: 19, oneWay: false, sidewalk: false, barriers: false, rails: false, lamps: "one" },
   ring: { lanes: 1, laneWidth: 6.5, median: 0, shoulder: 1.4, speed: 9, oneWay: true, sidewalk: true, barriers: false, rails: false, lamps: "none" },
+  /** One-way freeway on/off ramp (slip road). */
+  ramp: { lanes: 1, laneWidth: 4.0, median: 0, shoulder: 1.8, speed: 17, oneWay: true, sidewalk: false, barriers: false, rails: true, lamps: "one" },
+  /** One-way frontage / service road running alongside a highway. */
+  service: { lanes: 2, laneWidth: 3.4, median: 0, shoulder: 1.0, speed: 13, oneWay: true, sidewalk: true, barriers: false, rails: false, lamps: "one" },
+  /** Airfield runway: a 46 m wide, dead-flat straight - the top-speed strip. */
+  runway: { lanes: 1, laneWidth: 18, median: 4, shoulder: 3, speed: 14, oneWay: false, sidewalk: false, barriers: false, rails: false, lamps: "none" },
 };
 
 export function roadWidth(c: RoadClass): number {
@@ -60,6 +73,8 @@ export interface NodeDef {
   n: number;
   kind: JunctionKind;
   label?: string;
+  /** Fixed deck height above the natural ground (overpass / elevated junction). */
+  lift?: number;
 }
 
 export interface RoadDef {
@@ -75,22 +90,8 @@ export interface RoadDef {
 }
 
 // ---------------------------------------------------------------------------
-// Fairbay Circle (roundabout)
+// Helpers
 // ---------------------------------------------------------------------------
-
-export const CIRCLE = { e: 120, n: 60, r: 48, island: 38 };
-
-/** Exit angles (degrees CCW from east) and the spoke each exit feeds. */
-const EXITS: [string, number][] = [
-  ["B", 12],
-  ["A", 92],
-  ["H", 142],
-  ["D", 192],
-  ["C", 268],
-  ["F", 318],
-];
-
-const polar = (deg: number, r: number, c = CIRCLE): [number, number] => [c.e + r * Math.cos((deg * Math.PI) / 180), c.n + r * Math.sin((deg * Math.PI) / 180)];
 
 const nodes: NodeDef[] = [];
 const roads: RoadDef[] = [];
@@ -98,8 +99,28 @@ const N = (id: string, e: number, n: number, kind: JunctionKind, label?: string)
 const R = (id: string, name: string, cls: RoadClass, from: string, to: string, via: [number, number][] = [], main = false) =>
   roads.push({ id, name, cls, from, to, via, main });
 
-// Roundabout entry nodes + one-way ring arcs (counter-clockwise for
-// right-hand traffic, seen from above with north up).
+/** Interstate 9 through Midtown runs on a straight viaduct line. */
+const I9 = (e: number): [number, number] => [e, -40 - 0.0787 * (e + 470)];
+/** Frontage roads run 28 m either side of the I-9 viaduct. */
+const FN = (e: number): [number, number] => [e, I9(e)[1] + 28];
+const FS = (e: number): [number, number] => [e, I9(e)[1] - 28];
+const NE = (id: string, p: [number, number], kind: JunctionKind, label?: string) => N(id, p[0], p[1], kind, label);
+
+// ---------------------------------------------------------------------------
+// Fairbay Circle - a small 4-exit roundabout in the Old Town square
+// ---------------------------------------------------------------------------
+
+export const CIRCLE = { e: -40, n: 400, r: 34, island: 24 };
+
+const EXITS: [string, number][] = [
+  ["E", 0],
+  ["N", 90],
+  ["W", 180],
+  ["S", 270],
+];
+
+const polar = (deg: number, r: number, c = CIRCLE): [number, number] => [c.e + r * Math.cos((deg * Math.PI) / 180), c.n + r * Math.sin((deg * Math.PI) / 180)];
+
 for (const [to, deg] of EXITS) {
   const [e, n] = polar(deg, CIRCLE.r);
   N(`rb-${to}`, e, n, "roundabout", "Fairbay Circle");
@@ -115,155 +136,293 @@ for (let i = 0; i < EXITS.length; i++) {
 }
 
 // ---------------------------------------------------------------------------
-// Downtown: crescent nodes, outer boulevard nodes
+// Highways
 // ---------------------------------------------------------------------------
 
-// Crescent junctions (~230 m out along each spoke).
-N("mB", 346, 104, "signal");
-N("mA", 96, 290, "signal");
-N("mH", -58, 206, "signal");
-N("mD", -108, 16, "signal");
-N("mC", 108, -172, "signal");
-N("mF", 300, -90, "signal");
+// Interstate 9: Westside -> over the Fair River -> elevated through Midtown
+// -> north-east past Ironworks -> the Airfield.
+N("W9", -980, -150, "priority", "Westside Interchange");
+N("X1", -470, -40, "priority", "Midtown West Interchange");
+N("X2", 610, -125, "priority", "Midtown East Interchange");
+N("J79", 770, 30, "priority", "Bayshore Interchange");
+N("N9", 900, 430, "priority", "Airfield Interchange");
+R("i9-1", "Interstate 9", "freeway", "W9", "X1", [[-860, -120], [-720, -70], [-600, -50]], true);
+R("i9-2", "Interstate 9", "freeway", "X1", "X2", [I9(-200), I9(100), I9(400)], true);
+R("i9-3", "Interstate 9", "freeway", "X2", "J79", [[700, -70]], true);
+R("i9-4", "Interstate 9", "freeway", "J79", "N9", [[850, 180], [900, 320]], true);
 
-// Outer boulevard junctions.
-N("B", 585, 125, "signal");
-N("E", 425, 418, "signal");
-N("A", 68, 487, "signal");
-N("H", -214, 361, "signal");
-N("D", -316, -2, "signal");
-N("G", -170, -262, "signal");
-N("C", 118, -362, "signal");
-N("F", 482, -224, "signal");
+// Route 7 Bayshore Expressway: the Port -> Ironworks -> I-9.
+N("R7S", 830, -620, "priority", "Port Interchange");
+N("R7M", 800, -320, "priority", "Foundry Interchange");
+R("r7-1", "Bayshore Expressway", "freeway", "R7S", "R7M", [[820, -470]], true);
+R("r7-2", "Bayshore Expressway", "freeway", "R7M", "J79", [[790, -150]], true);
 
-// Spokes (roundabout -> crescent -> boulevard), gently curving.
-R("bay-1", "Bay Street", "boulevard", "rb-B", "mB", [[250, 92]]);
-R("bay-2", "Bay Street", "boulevard", "mB", "B", [[470, 122]]);
-R("lib-1", "Liberty Avenue", "avenue", "rb-A", "mA", [[110, 190]]);
-R("lib-2", "Liberty Avenue", "avenue", "mA", "A", [[80, 390]]);
-R("park-1", "Parkway", "avenue", "rb-H", "mH", [[30, 150]]);
-R("park-2", "Parkway", "avenue", "mH", "H", [[-140, 290]]);
-R("mkt-1", "Market Street", "boulevard", "rb-D", "mD", [[-10, 40]]);
-R("mkt-2", "Market Street", "boulevard", "mD", "D", [[-215, 4]]);
-R("cen-1", "Centre Street", "avenue", "rb-C", "mC", [[122, -70]]);
-R("cen-2", "Centre Street", "avenue", "mC", "C", [[104, -268]]);
-R("har-1", "Harbor Boulevard", "boulevard", "rb-F", "mF", [[226, -24]]);
-R("har-2", "Harbor Boulevard", "boulevard", "mF", "F", [[392, -158]]);
-
-// Crescent (inner ring street).
-R("cr-BA", "Crescent", "street", "mB", "mA", [[310, 220], [210, 290]]);
-R("cr-AH", "Crescent", "street", "mA", "mH", [[18, 268]]);
-R("cr-HD", "Crescent", "street", "mH", "mD", [[-110, 116]]);
-R("cr-DC", "Crescent", "street", "mD", "mC", [[-80, -100], [0, -160]]);
-R("cr-CF", "Crescent", "street", "mC", "mF", [[214, -150]]);
-R("cr-FB", "Crescent", "street", "mF", "mB", [[352, 2]]);
-
-// Outer boulevard ring ("Ring Road").
-R("rr-BE", "Ring Road", "boulevard", "B", "E", [[540, 290]]);
-R("rr-EA", "Ring Road", "boulevard", "E", "A", [[250, 480]]);
-R("rr-AH", "Ring Road", "boulevard", "A", "H", [[-80, 450]]);
-R("rr-HD", "Ring Road", "boulevard", "H", "D", [[-300, 190]]);
-R("rr-DG", "Ring Road", "boulevard", "D", "G", [[-270, -150]]);
-R("rr-GC", "Ring Road", "boulevard", "G", "C", [[-30, -340]]);
-R("rr-CF", "Ring Road", "boulevard", "C", "F", [[310, -330]]);
-R("rr-FB", "Ring Road", "boulevard", "F", "B", [[570, -50]]);
+// I-9 frontage (service) roads along the Midtown viaduct, with on/off ramps.
+// Eastbound runs on the south side, westbound on the north side.
+const AV = [-250, -60, 130, 320, 470]; // Midtown avenues passing under I-9
+NE("SF0", FS(-330), "priority");
+NE("NF0", FN(-330), "priority");
+AV.forEach((e, i) => {
+  NE(`SF${i + 1}`, FS(e), "signal");
+  NE(`NF${i + 1}`, FN(e), "signal");
+});
+R("ramp-x1-eb", "I-9 Exit 4", "ramp", "X1", "SF0", [[-400, -62]]);
+R("ramp-x1-wb", "I-9 Entrance 4", "ramp", "NF0", "X1", [[-400, -18]]);
+R("ramp-x2-eb", "I-9 Entrance 7", "ramp", "SF5", "X2", [[545, -150]]);
+R("ramp-x2-wb", "I-9 Exit 7", "ramp", "X2", "NF5", [[545, -100]]);
+R("sf-0", "Midtown Frontage Road", "service", "SF0", "SF1");
+R("nf-0", "Midtown Frontage Road", "service", "NF1", "NF0");
+for (let i = 1; i < AV.length; i++) {
+  R(`sf-${i}`, "Midtown Frontage Road", "service", `SF${i}`, `SF${i + 1}`);
+  R(`nf-${i}`, "Midtown Frontage Road", "service", `NF${i + 1}`, `NF${i}`);
+}
 
 // ---------------------------------------------------------------------------
-// Outer districts
+// Midtown (between I-9 and Downtown) - irregular blocks, a diagonal avenue
 // ---------------------------------------------------------------------------
 
-// Freeway junctions (priority: the freeway keeps right of way).
-N("FN", 40, 960, "priority", "Northgate Interchange");
-N("FNE", 700, 760, "priority", "Old Town Interchange");
-N("FE", 1030, 150, "priority", "Eastport Interchange");
-N("FSE", 850, -480, "priority", "Foundry Interchange");
-N("FS", 150, -690, "priority", "Harbor Interchange");
-N("FSW", -420, -600, "priority", "Southwest Interchange");
-N("FW", -560, 40, "priority", "Riverside Interchange");
-N("FNW", -430, 700, "priority", "Hillcrest Interchange");
+N("K1", -250, -250, "signal");
+N("K2", -60, -270, "signal");
+N("K3", 130, -250, "signal");
+N("K4", 320, -235, "signal");
+N("K5", 470, -270, "signal");
+N("G2", -60, -335, "signal");
+N("G3", 130, -310, "signal");
+N("U1", -250, -410, "signal");
+N("U2", -60, -420, "signal");
+N("U3", 130, -405, "signal");
+N("U4", 320, -420, "signal");
+N("U5", 470, -400, "signal");
 
-R("fw-1", "Fairbay Loop", "freeway", "FN", "FNE", [[380, 900]], true);
-R("fw-2", "Fairbay Loop", "freeway", "FNE", "FE", [[950, 500]], true);
-R("fw-3", "Fairbay Loop", "freeway", "FE", "FSE", [[1010, -200]], true);
-R("fw-4", "Fairbay Loop", "freeway", "FSE", "FS", [[500, -640]], true);
-R("fw-5", "Fairbay Loop", "freeway", "FS", "FSW", [[-140, -690]], true);
-R("fw-6", "Fairbay Loop", "freeway", "FSW", "FW", [[-540, -280]], true);
-R("fw-7", "Fairbay Loop", "freeway", "FW", "FNW", [[-560, 380]], true);
-R("fw-8", "Fairbay Loop", "freeway", "FNW", "FN", [[-200, 880]], true);
+// Avenues (north-south, each with its own gentle tilt).
+R("a1-0", "Riverside Avenue", "avenue", "NF1", "SF1");
+R("a1-1", "Riverside Avenue", "avenue", "SF1", "K1");
+R("a1-2", "Riverside Avenue", "avenue", "K1", "U1");
+R("main-0", "Main Street", "boulevard", "NF2", "SF2");
+R("main-1", "Main Street", "boulevard", "SF2", "K2");
+R("main-2", "Main Street", "boulevard", "K2", "G2");
+R("main-3", "Main Street", "boulevard", "G2", "U2");
+R("a3-0", "Lexington Avenue", "avenue", "NF3", "SF3");
+R("a3-1", "Lexington Avenue", "avenue", "SF3", "K3");
+R("a3-2", "Lexington Avenue", "avenue", "K3", "G3");
+R("a3-3", "Lexington Avenue", "avenue", "G3", "U3");
+R("a4-0", "Commerce Avenue", "avenue", "NF4", "SF4");
+R("a4-1", "Commerce Avenue", "avenue", "SF4", "K4");
+R("a4-2", "Commerce Avenue", "avenue", "K4", "U4");
+R("a5-0", "Harbor Avenue", "avenue", "NF5", "SF5");
+R("a5-1", "Harbor Avenue", "avenue", "SF5", "K5");
+R("a5-2", "Harbor Avenue", "avenue", "K5", "U5");
 
-// Mid-link junctions.
-N("O1", 55, 720, "signal");
-N("O2", 560, 590, "signal");
-N("H2", -300, 500, "signal");
-N("I1", 810, 140, "signal");
-N("I2", 660, -360, "signal");
-N("S1", 135, -530, "signal");
-N("S2", -300, -440, "signal");
+// Kingsway - a long, slightly curving cross-town street.
+N("RV2", -590, -250, "signal");
+R("kings-1", "Kingsway", "avenue", "RV2", "K1", [[-420, -238]]);
+R("kings-2", "Kingsway", "avenue", "K1", "K2", [[-155, -268]]);
+R("kings-3", "Kingsway", "avenue", "K2", "K3", [[35, -262]]);
+R("kings-4", "Kingsway", "avenue", "K3", "G4");
+R("kings-5", "Kingsway", "avenue", "G4", "K4");
+R("kings-6", "Kingsway", "avenue", "K4", "K5", [[400, -258]]);
+// Grand Avenue continues north-east from Kingsway to the frontage road.
+R("grand-4", "Grand Avenue", "boulevard", "G4", "SF4", [[275, -190]]);
 
-// Link roads (boulevard -> freeway).
-R("ng-1", "Northgate Avenue", "avenue", "A", "O1", [[62, 600]]);
-R("ng-2", "Northgate Avenue", "avenue", "O1", "FN", [[48, 840]]);
-R("ot-1", "Old Town Road", "avenue", "E", "O2", [[490, 500]]);
-R("ot-2", "Old Town Road", "avenue", "O2", "FNE", [[640, 670]]);
-R("be-1", "Bay Street East", "avenue", "B", "I1", [[700, 140]]);
-R("be-2", "Bay Street East", "avenue", "I1", "FE", [[920, 150]]);
-R("fd-1", "Foundry Road", "avenue", "F", "I2", [[570, -300]]);
-R("fd-2", "Foundry Road", "avenue", "I2", "FSE", [[760, -420]]);
-R("ha-1", "Harbor Avenue", "avenue", "C", "S1", [[128, -450]]);
-R("ha-2", "Harbor Avenue", "avenue", "S1", "FS", [[142, -610]]);
-R("sw-1", "Southwest Parkway", "avenue", "G", "S2", [[-232, -350]]);
-R("sw-2", "Southwest Parkway", "avenue", "S2", "FSW", [[-360, -520]]);
-R("wm", "West Market", "boulevard", "D", "FW", [[-440, 20]]);
-R("hc-1", "Hillcrest Drive", "avenue", "H", "H2", [[-270, 450]]);
-R("hc-2", "Hillcrest Drive", "avenue", "H2", "FNW", [[-330, 590], [-300, 660], [-370, 690]]);
+// Union Street.
+N("S1", -450, -420, "signal");
+R("union-0", "Union Street", "street", "S1", "U1");
+R("union-1", "Union Street", "street", "U1", "U2");
+R("union-2", "Union Street", "street", "U2", "U3");
+R("union-3", "Union Street", "street", "U3", "U4");
+R("union-4", "Union Street", "street", "U4", "U5");
 
-// Cross streets.
-R("cath", "Cathedral Street", "street", "O1", "O2", [[200, 735], [400, 680]]);
-R("elm", "Elm Crescent", "street", "O1", "H2", [[-60, 680], [-220, 610]]);
-R("smelt", "Smelter Way", "street", "I1", "I2", [[830, 0], [780, -220]]);
-R("canal", "Canal Street", "street", "S1", "S2", [[0, -560], [-170, -520]]);
-R("mill", "Mill Street", "street", "S1", "I2", [[300, -520], [500, -440]]);
+// Grand Avenue - a diagonal boulevard cutting across the blocks.
+R("grand-1", "Grand Avenue", "boulevard", "U1", "G2");
+R("grand-2", "Grand Avenue", "boulevard", "G2", "G3");
+// Grand Avenue meets Kingsway at its own junction, 110 m east of Lexington.
+N("G4", 240, -244, "signal");
+R("grand-3", "Grand Avenue", "boulevard", "G3", "G4", [[190, -285]]);
 
-// South coast.
-N("BCH", -390, -780, "priority", "Sunset Beach");
-N("P1", 650, -790, "priority", "Port Fairbay");
-R("ocean", "Ocean Drive", "coast", "FS", "BCH", [[20, -790], [-200, -835]]);
-R("coast-1", "Coast Highway", "coast", "FSW", "BCH", [[-380, -690]], true);
-R("coast-2", "Coast Highway", "coast", "BCH", "W2", [[-480, -840], [-590, -860], [-720, -820], [-860, -700]], true);
-R("hfront", "Harbor Front", "avenue", "FS", "P1", [[300, -760], [480, -795]]);
-R("dock", "Dock Street", "avenue", "P1", "FSE", [[860, -760], [935, -620]]);
+// ---------------------------------------------------------------------------
+// Downtown waterfront
+// ---------------------------------------------------------------------------
 
-// Westside (across the Fair River).
-N("W1", -950, 110, "signal");
-N("W3", -1000, -200, "priority");
-N("W2", -930, -500, "priority");
-R("bridge-n", "Riverside Bridge", "boulevard", "FW", "W1", [[-720, 70], [-850, 96]]);
-R("wa-1", "Westside Avenue", "street", "W1", "W3", [[-990, -40]], true);
-R("wa-2", "Westside Avenue", "street", "W3", "W2", [[-975, -360]], true);
-R("maple", "Maple Loop", "street", "W3", "W3", [[-1110, -110], [-1190, -250], [-1110, -380]]);
+N("D11", -60, -560, "signal");
+N("D12", 110, -580, "signal");
+N("D13", 250, -590, "signal");
+N("D14", 380, -600, "signal");
+N("D21", -60, -700, "signal");
+N("D22", 100, -720, "signal");
+N("D23", 240, -730, "signal");
+N("W1", -60, -880, "signal");
+N("W2", 100, -850, "signal");
+N("W3", 250, -805, "signal");
+N("W4", 440, -680, "signal");
+N("S2", -260, -620, "signal");
+N("S3", -270, -750, "signal");
 
-// Mount Calder hairpins: Hillcrest -> summit -> Westside.
+R("main-4", "Main Street", "boulevard", "U2", "D11");
+R("main-5", "Main Street", "boulevard", "D11", "D21");
+R("main-6", "Main Street", "boulevard", "D21", "W1");
+R("a3-4", "Lexington Avenue", "avenue", "U3", "D12");
+R("a3-5", "Lexington Avenue", "avenue", "D12", "D22");
+R("a3-6", "Lexington Avenue", "avenue", "D22", "W2");
+R("a4-3", "Commerce Avenue", "avenue", "U4", "D13", [[290, -505]]);
+R("a4-4", "Commerce Avenue", "avenue", "D13", "D23");
+R("a4-5", "Commerce Avenue", "avenue", "D23", "W3");
+R("bay-st", "Bay Street", "avenue", "U5", "D14", [[430, -500]]);
+R("bay-st-2", "Bay Street", "avenue", "D14", "W4");
+R("market-0", "Market Street", "street", "S2", "D11", [[-160, -585]]);
+R("market-1", "Market Street", "street", "D11", "D12");
+R("market-2", "Market Street", "street", "D12", "D13");
+R("market-3", "Market Street", "street", "D13", "D14");
+R("harbor-0", "Harbor Street", "street", "S3", "D21", [[-165, -722]]);
+R("harbor-1", "Harbor Street", "street", "D21", "D22");
+R("harbor-2", "Harbor Street", "street", "D22", "D23");
+R("water-1", "Waterfront Drive", "boulevard", "W1", "W2", [[20, -870]]);
+R("water-2", "Waterfront Drive", "boulevard", "W2", "W3", [[175, -832]]);
+R("water-3", "Waterfront Drive", "boulevard", "W3", "W4", [[340, -752]]);
+R("baydr", "Bay Drive", "boulevard", "W4", "R7S", [[570, -700], [700, -690]]);
+
+// ---------------------------------------------------------------------------
+// Southside and Sunset Beach
+// ---------------------------------------------------------------------------
+
+N("S4", -470, -650, "signal");
+N("BCH", -300, -860, "priority", "Sunset Beach");
+N("CH2", -520, -800, "priority");
+R("ocean-1", "Ocean Avenue", "avenue", "U1", "S2", [[-252, -515]]);
+R("ocean-2", "Ocean Avenue", "avenue", "S2", "S3");
+R("ocean-3", "Ocean Avenue", "avenue", "S3", "BCH", [[-285, -805]]);
+R("beach-rd", "Sunset Boulevard", "coast", "BCH", "W1", [[-180, -905], [-110, -895]]);
+R("palm", "Palm Street", "street", "S4", "S3", [[-370, -705]]);
+R("riverside-s", "Riverbank Road", "street", "RV2", "S1", [[-540, -340]]);
+R("south-1", "Southside Road", "street", "S1", "S4", [[-475, -540]]);
+R("south-2", "Southside Road", "street", "S4", "CH2", [[-490, -730]]);
+R("coast-1", "Coast Highway", "coast", "CH2", "BCH", [[-410, -840]], true);
+
+// ---------------------------------------------------------------------------
+// Westside (across the Fair River) and the coast highway
+// ---------------------------------------------------------------------------
+
+N("WS", -960, -520, "priority");
+N("WM", -1000, 30, "signal");
+N("WN", -990, 200, "priority");
+R("coast-w", "Coast Highway", "coast", "WS", "CH2", [[-860, -740], [-700, -800]], true);
+R("westside-s", "Westside Avenue", "avenue", "WS", "W9", [[-990, -340]]);
+R("westside-m", "Westside Avenue", "avenue", "W9", "WM", [[-995, -60]]);
+R("westside-n", "Westside Avenue", "avenue", "WM", "WN", [[-1000, 120]]);
+R("maple", "Maple Drive", "street", "WM", "W9", [[-1110, 10], [-1160, -90], [-1080, -175]]);
+
+// ---------------------------------------------------------------------------
+// North of I-9: Park Row, Central Park, Old Town
+// ---------------------------------------------------------------------------
+
+N("RV1", -600, 40, "signal");
+N("O1", -250, 120, "signal");
+N("O2", -60, 140, "signal");
+N("O3", 130, 130, "signal");
+N("O4", 320, 110, "signal");
+N("O9", 520, 80, "signal");
+R("riverside-n", "Riverbank Road", "street", "RV1", "RV2", [[-610, -120]]);
+R("parkrow-0", "Park Row", "avenue", "RV1", "O1", [[-430, 90]]);
+R("parkrow-1", "Park Row", "avenue", "O1", "O2");
+R("parkrow-2", "Park Row", "avenue", "O2", "O3");
+R("parkrow-3", "Park Row", "avenue", "O3", "O4");
+R("parkrow-4", "Park Row", "avenue", "O4", "O9", [[420, 100]]);
+R("a1-n", "Riverside Avenue", "avenue", "O1", "NF1");
+R("main-n", "Main Street", "boulevard", "O2", "NF2");
+R("a3-n", "Lexington Avenue", "avenue", "O3", "NF3");
+R("a4-n", "Commerce Avenue", "avenue", "O4", "NF4");
+R("a5-n", "Harbor Avenue", "avenue", "O9", "NF5");
+
+N("O5", 200, 430, "signal");
+N("O6", -230, 410, "signal");
+N("O7", -20, 600, "signal");
+N("O8", 380, 430, "signal");
+N("O10", 600, 350, "signal");
+R("cathedral", "Cathedral Road", "avenue", "O2", "rb-S", [[-55, 250]]);
+R("queen-w", "Queen Street", "street", "rb-E", "O5", [[100, 418]]);
+R("queen", "Queen Street", "street", "O5", "O8", [[290, 440]]);
+R("parkside", "Parkside Drive", "street", "O3", "O5", [[150, 280]]);
+R("parkeast", "Park East Drive", "street", "O4", "O8", [[355, 280]]);
+R("oldmill", "Old Mill Road", "street", "O6", "O1", [[-215, 260]]);
+R("bell-w", "Bell Lane", "street", "rb-W", "O6", [[-150, 395]]);
+R("chapel", "Chapel Street", "street", "rb-N", "O7", [[-45, 510]]);
+R("eastgate", "Eastgate Road", "avenue", "O9", "O10", [[575, 210]]);
+R("tannery", "Tannery Lane", "street", "O8", "O10", [[490, 405]]);
+R("airport-rd", "Airport Road", "avenue", "O10", "N9", [[760, 370]]);
+
+// ---------------------------------------------------------------------------
+// Hillcrest suburbs, Ridge Parkway, the Airfield
+// ---------------------------------------------------------------------------
+
+N("H0", -470, 240, "signal");
+N("H1", -420, 430, "signal");
+N("H2", -560, 520, "priority");
+N("H3", -330, 560, "priority");
+N("RP2", 430, 690, "signal");
+N("RP3", 60, 720, "signal");
+N("RP4", -280, 680, "priority");
+N("RP5", -480, 620, "priority");
+R("hill-rd", "Hill Road", "street", "O1", "H0", [[-360, 190]]);
+R("hc-1", "Hillcrest Drive", "street", "RV1", "H0", [[-560, 150]]);
+R("hc-2", "Hillcrest Drive", "street", "H0", "H1", [[-470, 340]]);
+R("hc-3", "Hillcrest Drive", "street", "O6", "H1", [[-320, 445]]);
+R("hc-4", "Hillcrest Drive", "street", "H1", "H2", [[-500, 450]]);
+R("hc-5", "Lakeview Road", "street", "H2", "RP5");
+R("hc-6", "Lakeview Road", "street", "H1", "H3", [[-390, 510]]);
+R("bell", "Bell Lane", "street", "H3", "O7", [[-230, 610], [-110, 575]]);
+R("rp-1", "Ridge Parkway", "boulevard", "N9", "RP2", [[720, 610], [560, 660]]);
+R("rp-2", "Ridge Parkway", "boulevard", "RP2", "RP3", [[240, 735]]);
+R("rp-3", "Ridge Parkway", "boulevard", "RP3", "RP4", [[-110, 715]]);
+R("rp-4", "Ridge Parkway", "boulevard", "RP4", "RP5");
+R("rp-o7", "North Road", "street", "O7", "RP3", [[30, 660]]);
+R("rp-o8", "Hangar Way", "avenue", "O8", "RP2", [[410, 560]]);
+R("rp-h3", "Crest Road", "street", "H3", "RP4");
+
+N("AF1", 540, 860, "priority", "Fairbay Airfield");
+N("AF2", 1000, 860, "priority");
+N("AF5", 900, 640, "priority");
+R("runway", "Runway 09/27", "runway", "AF1", "AF2");
+R("af-rd", "Airfield Road", "avenue", "N9", "AF5");
+R("taxi-e", "Taxiway Echo", "street", "AF5", "AF2", [[985, 720]]);
+R("taxi-w", "Taxiway Whiskey", "street", "AF5", "AF1", [[720, 720], [600, 770]]);
+R("hangar", "Hangar Road", "street", "AF1", "RP2", [[480, 770]]);
+
+// ---------------------------------------------------------------------------
+// Ironworks and Port Fairbay
+// ---------------------------------------------------------------------------
+
+N("F1", 620, -360, "signal");
+N("F3", 980, -310, "priority");
+R("foundry-w", "Foundry Road", "avenue", "U5", "F1", [[545, -385]]);
+R("foundry-m", "Foundry Road", "avenue", "F1", "R7M");
+R("foundry-e", "Foundry Road", "avenue", "R7M", "F3", [[890, -312]]);
+R("steel", "Steel Street", "street", "F1", "K5", [[545, -310]]);
+R("smelter", "Smelter Way", "avenue", "F3", "J79", [[985, -120], [900, 10]]);
+R("port-rd", "Port Road", "avenue", "R7S", "F3", [[900, -790], [1030, -760], [1045, -560], [1010, -420]]);
+
+// ---------------------------------------------------------------------------
+// Mount Calder: hairpins from Hillcrest over the summit down to Westside
+// ---------------------------------------------------------------------------
+
 N("SU", -860, 1010, "priority", "Calder Summit");
-R("mt-up", "Calder Pass", "mountain", "FNW", "SU", [
-  [-470, 820],
-  [-560, 860],
-  [-640, 835],
+R("mt-up", "Calder Pass", "mountain", "RP5", "SU", [
+  [-470, 730],
+  [-520, 830],
+  [-620, 835],
   [-690, 885],
   [-620, 945],
   [-560, 995],
   [-640, 1055],
   [-760, 1065],
 ]);
-R("mt-down", "Calder Pass", "mountain", "SU", "W1", [
+R("mt-down", "Calder Pass", "mountain", "SU", "WN", [
   [-960, 965],
   [-1040, 860],
   [-1000, 760],
   [-1080, 640],
   [-1025, 500],
   [-1065, 380],
-  [-995, 250],
+  [-1010, 290],
 ]);
-// A short spur to the summit lookout keeps SU a real junction.
 N("LOOK", -760, 1180, "priority", "Calder Lookout");
 R("look", "Lookout Road", "mountain", "SU", "LOOK", [[-880, 1080], [-830, 1150]]);
 
@@ -278,34 +437,43 @@ export const ROADS: readonly RoadDef[] = roads;
 export const RIVER: [number, number][] = [
   [-720, 730],
   [-760, 560],
-  [-770, 400],
-  [-735, 180],
-  [-725, 0],
-  [-690, -250],
-  [-650, -450],
-  [-612, -700],
-  [-588, -880],
-  [-575, -1060],
+  [-790, 400],
+  [-760, 200],
+  [-740, 0],
+  [-720, -200],
+  [-700, -420],
+  [-680, -640],
+  [-660, -820],
+  [-650, -1000],
 ];
 export const RIVER_HALF = 19;
 export const LAKE = { e: -720, n: 730, r: 55 };
 
-/** Coastline (E, N), west to east. The sea lies south of it. */
+/**
+ * Coastline (E, N), west to east. The sea lies south of it. Irregular on
+ * purpose: Fairbay Bay bites into the coast below Downtown, a headland
+ * holds the Port, and the shore swings north past Sunset Beach.
+ */
 export const COAST: [number, number][] = [
-  [-1400, -700],
-  [-1100, -760],
-  [-900, -860],
-  [-700, -930],
-  [-575, -965],
-  [-400, -935],
-  [-200, -912],
-  [0, -900],
-  [200, -925],
-  [400, -935],
-  [600, -935],
-  [800, -925],
-  [1000, -895],
-  [1400, -860],
+  [-1400, -660],
+  [-1150, -700],
+  [-950, -800],
+  [-760, -880],
+  [-640, -960],
+  [-460, -930],
+  [-300, -925],
+  [-160, -960],
+  [-40, -965],
+  [90, -930],
+  [220, -880],
+  [330, -830],
+  [470, -770],
+  [560, -790],
+  [650, -860],
+  [800, -900],
+  [960, -880],
+  [1100, -840],
+  [1400, -820],
 ];
 
 export const WATER_LEVEL = -1.4;
@@ -325,7 +493,8 @@ export type District =
   | "southside"
   | "beach"
   | "westside"
-  | "highlands";
+  | "highlands"
+  | "airfield";
 
 export const DISTRICT_NAMES: Record<District, string> = {
   downtown: "Downtown",
@@ -339,29 +508,42 @@ export const DISTRICT_NAMES: Record<District, string> = {
   beach: "Sunset Beach",
   westside: "Westside",
   highlands: "Mount Calder",
+  airfield: "Fairbay Airfield",
 };
 
-/** Central Park: the wedge between Parkway and Liberty, Crescent to Ring Road. */
+/** District regions as polygons (E, N); the first match wins. */
+export const DISTRICT_POLYS: [District, [number, number][]][] = [
+  ["downtown", [[-200, -480], [520, -480], [520, -660], [470, -760], [250, -830], [100, -880], [-120, -920], [-200, -900]]],
+  ["midtown", [[-560, 40], [560, -40], [560, -480], [-560, -480]]],
+  ["park", [[130, 150], [320, 130], [355, 420], [200, 430], [140, 300]]],
+  ["oldtown", [[-300, 130], [600, 70], [640, 460], [300, 560], [-300, 640]]],
+  ["airfield", [[380, 760], [1150, 760], [1150, 1000], [380, 1000]]],
+  ["hillcrest", [[-640, 60], [-300, 130], [-300, 780], [-700, 780]]],
+  ["ironworks", [[560, 60], [1150, 60], [1150, -560], [560, -560]]],
+  ["port", [[520, -560], [1150, -560], [1150, -900], [520, -900]]],
+  ["beach", [[-640, -760], [-200, -760], [-200, -1000], [-640, -1000]]],
+  ["southside", [[-640, -480], [-200, -480], [-200, -760], [-640, -760]]],
+];
+
+/** Central Park: between Parkside and Park East, Park Row to Queen Street. */
 export const PARK_POLY: [number, number][] = [
-  [96, 300],
-  [80, 390],
-  [68, 470],
-  [-80, 440],
-  [-200, 360],
-  [-140, 290],
-  [-62, 215],
-  [18, 270],
+  [160, 160],
+  [300, 140],
+  [335, 300],
+  [350, 410],
+  [215, 412],
+  [170, 300],
 ];
 
 /** Off-road jump ramps (never in a traffic lane): position, heading (deg, 0 = north, CW to east), size. */
 export const RAMPS: { e: number; n: number; bearing: number; length: number; height: number; width: number; label: string }[] = [
-  { e: -660, n: -110, bearing: 262, length: 14, height: 3.2, width: 9, label: "River jump" },
-  { e: -300, n: -870, bearing: 270, length: 11, height: 2.4, width: 8, label: "Beach kicker" },
-  { e: 470, n: -860, bearing: 90, length: 12, height: 2.8, width: 8, label: "Quay launch" },
-  { e: 760, n: -110, bearing: 0, length: 10, height: 2.3, width: 7, label: "Smelter ramp" },
-  { e: -60, n: 370, bearing: 300, length: 9, height: 2.0, width: 7, label: "Park hop" },
+  { e: -650, n: -330, bearing: 268, length: 14, height: 3.2, width: 9, label: "River jump" },
+  { e: -420, n: -900, bearing: 270, length: 11, height: 2.4, width: 8, label: "Beach kicker" },
+  { e: 720, n: -770, bearing: 90, length: 12, height: 2.8, width: 8, label: "Quay launch" },
+  { e: 900, n: -200, bearing: 0, length: 10, height: 2.3, width: 7, label: "Smelter ramp" },
+  { e: 255, n: 330, bearing: 330, length: 9, height: 2.0, width: 7, label: "Park hop" },
   { e: -1110, n: 520, bearing: 200, length: 10, height: 2.6, width: 8, label: "Calder drop" },
-  { e: 330, n: 820, bearing: 80, length: 10, height: 2.4, width: 7, label: "Old Town gap" },
+  { e: 760, n: 900, bearing: 90, length: 16, height: 3.4, width: 10, label: "Runway launch" },
 ];
 
 export const toWorld = (e: number, n: number): V2 => ({ x: -e, z: n });

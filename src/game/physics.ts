@@ -40,7 +40,8 @@ export const NO_CONTROLS: Controls = { throttle: 0, brake: 0, steer: 0, handbrak
 export type Surface = "road" | "offroad";
 
 export interface World {
-  ground(x: number, z: number): number;
+  /** Surface height; `y` (the asker's height) picks the deck where roads are stacked. */
+  ground(x: number, z: number, y?: number): number;
   surface(x: number, z: number): Surface;
   colliders: SpatialHash;
 }
@@ -83,6 +84,8 @@ export class CarPhysics {
   pitch = 0;
   /** Accumulated wheel rotation, rad. */
   wheelSpin = 0;
+  /** Player steering sensitivity multiplier (Settings: 0.6 - 1.6). */
+  sensitivity = 1;
   /** Simulated engine for the HUD and sound. */
   rpm = 0;
   gear = 1;
@@ -166,7 +169,11 @@ export class CarPhysics {
     this.throttle = c.throttle;
 
     // Steering input is smoothed so keyboard taps don't snap the wheel.
-    const steerRate = Math.abs(c.steer) > Math.abs(this.steer) ? 6 : 9;
+    // Steering wheel winds on / self-centres at the car's own rates, scaled
+    // by the player's sensitivity setting.
+    const feel = this.def.handling.steering;
+    const winding = Math.abs(c.steer) > Math.abs(this.steer) && Math.sign(c.steer) !== -Math.sign(this.steer);
+    const steerRate = (winding ? feel.rate : feel.centre) * this.sensitivity;
     this.steer = approach(this.steer, c.steer, steerRate * dt);
 
     let fx = this.forwardX;
@@ -210,8 +217,8 @@ export class CarPhysics {
       const handbrakeDrag = c.handbrake ? (this.drifting ? 1.6 : 5) : 0;
       const resist = drag + offDrag + handbrakeDrag;
       // Gravity along the slope: climbing slows you, descending speeds you up.
-      const ahead = world.ground(this.x + fx * 1.5, this.z + fz * 1.5);
-      const behind = world.ground(this.x - fx * 1.5, this.z - fz * 1.5);
+      const ahead = world.ground(this.x + fx * 1.5, this.z + fz * 1.5, this.y);
+      const behind = world.ground(this.x - fx * 1.5, this.z - fz * 1.5, this.y);
       const grade = clamp((ahead - behind) / 3, -0.4, 0.4);
       a -= 9.81 * grade;
       const before = vLong;
@@ -225,7 +232,8 @@ export class CarPhysics {
       const slip = speed > 2 ? Math.atan2(vLat, Math.abs(vLong)) : 0;
       if (!this.drifting) {
         const kick = c.handbrake && speed > 11 && Math.abs(this.steer) > 0.15;
-        const powerOver = h.drive !== "FWD" && c.throttle > 0 && Math.abs(slip) > 0.32 && speed > 13;
+        // Loose-rear cars break traction under power more readily.
+        const powerOver = h.drive !== "FWD" && c.throttle > 0 && Math.abs(slip) > 0.42 - 0.2 * feel.rear && speed > 13;
         if (kick || powerOver) {
           this.drifting = true;
           this.driftCalm = 0;
@@ -238,7 +246,7 @@ export class CarPhysics {
       }
 
       // ---- yaw -------------------------------------------------------------
-      const maxSteer = 0.58 / (1 + Math.abs(vLong) / 22);
+      const maxSteer = feel.lock / (1 + Math.abs(vLong) / feel.speedFalloff);
       const steerAngle = this.steer * maxSteer;
       let targetYaw = (vLong * Math.tan(steerAngle)) / this.wheelbase;
       if (this.drifting) {
@@ -248,12 +256,20 @@ export class CarPhysics {
       } else {
         const limit = h.cornering / Math.max(Math.abs(vLong), 4);
         targetYaw = clamp(targetYaw, -limit, limit);
+        // A loose rear under full power rotates the car past the grip limit.
+        if (h.drive === "RWD" && c.throttle >= 1 && Math.abs(this.steer) > 0.5) targetYaw *= 1 + feel.rear * 0.35;
       }
       const response = this.drifting ? 3.2 : h.response;
       this.yawRate = damp(this.yawRate, targetYaw, response, dt);
 
       // ---- lateral grip ----------------------------------------------------
       let grip = this.drifting ? h.driftGrip : h.grip;
+      // Power oversteer: on a loose-rear (rear-drive) car, full throttle while
+      // cornering overwhelms the rear tyres and lets the tail step out.
+      if (!this.drifting && h.drive === "RWD" && c.throttle >= 1) {
+        const cornerLoad = Math.abs(this.yawRate * vLong) / h.cornering;
+        grip *= 1 - feel.rear * 0.75 * clamp((cornerLoad - 0.6) * 2.5, 0, 1);
+      }
       if (c.handbrake) grip = Math.min(grip, h.driftGrip * 0.8);
       if (offroad) grip *= 0.6;
       const total = Math.hypot(vLong, vLat);
@@ -291,7 +307,7 @@ export class CarPhysics {
     this.z += this.vz * dt;
 
     // ---- vertical ------------------------------------------------------------
-    const g = world.ground(this.x, this.z);
+    const g = world.ground(this.x, this.z, this.y);
     if (!this.airborne) {
       if (g < this.y - 0.3) {
         this.airborne = true;
@@ -331,8 +347,8 @@ export class CarPhysics {
     if (this.airborne) {
       targetPitch = clamp(Math.atan2(this.vy, Math.max(Math.abs(vLong), 1)) * 0.6, -0.5, 0.5);
     } else {
-      const gf = world.ground(this.x + fx * half, this.z + fz * half);
-      const gr = world.ground(this.x - fx * half, this.z - fz * half);
+      const gf = world.ground(this.x + fx * half, this.z + fz * half, this.y);
+      const gr = world.ground(this.x - fx * half, this.z - fz * half, this.y);
       targetPitch = Math.atan2(gf - gr, this.wheelbase);
     }
     this.pitch = damp(this.pitch, targetPitch, this.airborne ? 3 : 14, dt);
@@ -354,6 +370,7 @@ export class CarPhysics {
         for (const col of near) {
           if (col.kind === "circle" && col.broken) continue;
           if (this.y > col.base + col.top) continue; // flying over it
+          if (this.y + this.def.body.height < col.base - 0.2) continue; // passing under it (overpass rail)
           if (col.kind !== "circle" && col.ramp && this.y > col.base + col.top * 0.4) continue; // on the ramp itself
           const hit = collide(cx, cz, this.radius, col);
           if (!hit) continue;
@@ -453,7 +470,9 @@ export class CarPhysics {
     this.limiter = c.throttle > 0 && target >= e.redline * 0.995;
     target = Math.min(target, e.redline);
     this.rpm = this.rpm === 0 ? target : this.rpm + (target - this.rpm) * (1 - Math.exp(-rate * dt));
-    this.load = c.throttle > 0 ? (this.shiftT > 0 ? 0.15 : 1) : 0;
+    // A quick shift keeps the engine under load (no throttle snap-shut), so
+    // the sound just drops in pitch - no hiss or pop on every gear change.
+    this.load = c.throttle > 0 ? (this.shiftT > 0 ? 0.7 : 1) : 0;
   }
 }
 

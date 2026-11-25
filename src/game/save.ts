@@ -22,6 +22,8 @@ export interface SaveData {
   hours: number;
   camera: number;
   showFps: boolean;
+  /** Steering sensitivity multiplier (0.6 - 1.6). */
+  steering: number;
   /** Bests. */
   topSpeedKmh: number;
   longestJump: number;
@@ -46,6 +48,7 @@ export function defaults(): SaveData {
     hours: 17.2,
     camera: 0,
     showFps: false,
+    steering: 1,
     topSpeedKmh: 0,
     longestJump: 0,
     bestDrift: 0,
@@ -93,6 +96,7 @@ export function parseSave(raw: string | null): SaveData {
     hours: num(o.hours, d.hours, 0, 23.999),
     camera: Math.round(num(o.camera, 0, 0, 2)),
     showFps: typeof o.showFps === "boolean" ? o.showFps : d.showFps,
+    steering: num(o.steering, d.steering, 0.6, 1.6),
     topSpeedKmh: num(o.topSpeedKmh, 0, 0, 1000),
     longestJump: num(o.longestJump, 0, 0, 1000),
     bestDrift: num(o.bestDrift, 0, 0, 1e7),
