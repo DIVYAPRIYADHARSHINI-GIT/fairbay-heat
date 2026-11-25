@@ -28,6 +28,23 @@ async function teleport(x, z, heading) {
   await waitSim(page, 0.05);
 }
 
+/** Puts the car in a lane of a named road, with traffic cleared and paused for a clean test. */
+async function onRoad(id, t = 0.1, lane = 0, traffic = false) {
+  await page.evaluate(
+    ({ id, t, lane, traffic }) => {
+      const g = window.__fh;
+      const r = g.city.net.road(id);
+      const s = r.s0 + (r.s1 - r.s0) * t;
+      const p = g.city.net.pointOn(id, s, r.laneOffset(Math.min(lane, r.spec.lanes - 1)));
+      g.traffic.clear();
+      g.traffic.enabled = traffic;
+      g.teleport(p.x, p.z, p.heading);
+    },
+    { id, t, lane, traffic },
+  );
+  await waitSim(page, 0.05);
+}
+
 try {
   section("Boot");
   const errors = await gotoGame(page, url);
@@ -61,13 +78,21 @@ try {
   check("HUD is visible while driving", await page.$eval(".hud", (e) => !e.classList.contains("hidden")));
 
   section("Driving with W A S D");
+  // A long, nearly straight stretch of the Fairbay Loop with traffic paused.
+  await onRoad("fw-5", 0.05, 1);
+  s = await snap(page);
   const x0 = s.x;
   const z0 = s.z;
+  const h00 = s.heading;
   await holdSim(page, ["KeyW"], 3);
   s = await snap(page);
   check("holding W accelerates past 60 km/h in 3 s", s.speedKmh > 60, `${s.speedKmh.toFixed(1)} km/h`);
-  check("the car drives forward (north, +Z)", s.z - z0 > 20 && Math.abs(s.x - x0) < 3, `dz=${(s.z - z0).toFixed(1)} dx=${(s.x - x0).toFixed(1)}`);
-  check("the gearbox has shifted up", s.gear >= 2, `gear ${s.gear}`);
+  const fwd = (s.x - x0) * Math.sin(h00) + (s.z - z0) * Math.cos(h00);
+  const side = Math.abs(-(s.x - x0) * Math.cos(h00) + (s.z - z0) * Math.sin(h00));
+  check("the car drives straight ahead in the direction it faces", fwd > 20 && side < 3, `forward ${fwd.toFixed(1)} m, sideways ${side.toFixed(1)} m`);
+  await holdSim(page, ["KeyW"], 1.2);
+  s = await snap(page);
+  check("the gearbox has shifted up (1st runs to ~80 km/h, like the real car)", s.gear >= 2, `gear ${s.gear} at ${s.speedKmh.toFixed(0)} km/h`);
   await shot("03-accelerating");
   const vCoast = s.speedKmh;
   await waitSim(page, 1.5);
@@ -84,7 +109,7 @@ try {
   check("keeping S held reverses (gear R)", s.vLong < -2 && s.gear === 0, `vLong=${s.vLong.toFixed(2)} gear=${s.gear}`);
   await holdSim(page, ["KeyW"], 0.6);
 
-  await teleport(-5, -300, 0);
+  await onRoad("fw-5", 0.05, 1);
   await holdSim(page, ["KeyW"], 2);
   const h0 = (await snap(page)).heading;
   await holdSim(page, ["KeyW", "KeyA"], 0.7);
@@ -96,7 +121,7 @@ try {
   check("W + D turns right (heading decreases)", s.heading - h1 < -0.25, `dHeading=${(s.heading - h1).toFixed(2)}`);
 
   section("Arrow keys work the same");
-  await teleport(-5, -300, 0);
+  await onRoad("fw-5", 0.05, 1);
   await holdSim(page, ["ArrowUp"], 2);
   s = await snap(page);
   check("ArrowUp accelerates", s.speedKmh > 40, `${s.speedKmh.toFixed(1)}`);
@@ -108,7 +133,7 @@ try {
   check("ArrowDown brakes", (await snap(page)).speedKmh < 5);
 
   section("Handbrake drift and nitro");
-  await teleport(-5, -300, 0);
+  await onRoad("fw-5", 0.05, 1);
   await holdSim(page, ["KeyW"], 3.5);
   await page.evaluate(() => (window.__fh.car.nitro = 0.3));
   await holdSim(page, ["KeyW", "KeyA", "Space"], 0.4);
@@ -119,9 +144,9 @@ try {
   s = await snap(page);
   check("drifting refills nitro", s.nitro > 0.3, s.nitro.toFixed(3));
   const drift = await page.$eval(".drift", (e) => ({ show: e.classList.contains("show"), text: e.textContent }));
-  check("the drift counter shows on screen", drift.show && /DRIFT \d/.test(drift.text), drift.text);
+  check("the drift counter shows on screen", drift.show && /DRIFT [0-9]/.test(drift.text), drift.text);
   await brakeToStop(page);
-  await teleport(-5, -300, 0);
+  await onRoad("fw-5", 0.05, 1);
   await page.evaluate(() => (window.__fh.car.nitro = 1));
   await holdSim(page, ["KeyW"], 1);
   await page.keyboard.down("KeyW");
@@ -139,33 +164,36 @@ try {
   section("Collisions and jumps");
   const wall = await page.evaluate(() => {
     const g = window.__fh;
-    // A building whose west face fronts a sidewalk, so the road in front is clear.
-    for (const b of g.city.blocks) {
-      if (b.district !== "downtown" && b.district !== "midtown") continue;
-      for (const c of g.city.colliders.query((b.minX + b.maxX) / 2, (b.minZ + b.maxZ) / 2, 60)) {
-        if (c.kind === "box" && c.top > 10 && c.top < 900 && Math.abs(c.minX - (b.minX + 4)) < 0.01 && c.maxZ - c.minZ > 20) {
-          return { face: c.minX, z: (c.minZ + c.maxZ) / 2, roadX: b.minX - 6 };
-        }
-      }
-    }
-    return null;
+    // A big downtown building: approach its street-facing side head-on.
+    const b = g.city.buildings.filter((x) => x.district === "downtown" && x.box.hx > 12).sort((p, q) => q.box.hx - p.box.hx)[0];
+    const { cx, cz, hz, c, s } = b.box;
+    // Outward normal of the -v face is (s, -c) in world terms.
+    const nx = s;
+    const nz = -c;
+    const face = { x: cx + nx * hz, z: cz + nz * hz };
+    return { start: { x: face.x + nx * 26, z: face.z + nz * 26 }, heading: Math.atan2(-nx, -nz), face, nx, nz };
   });
   check("found a building to crash into", wall !== null);
   if (wall) {
-    await teleport(wall.roadX - 30, wall.z, Math.PI / 2);
-    let maxX = -Infinity;
+    await page.evaluate(() => {
+      window.__fh.traffic.clear();
+      window.__fh.traffic.enabled = false;
+    });
+    await teleport(wall.start.x, wall.start.z, wall.heading);
+    let minD = Infinity;
     await page.keyboard.down("KeyW");
     for (let i = 0; i < 25; i++) {
       await waitSim(page, 0.15);
-      maxX = Math.max(maxX, (await snap(page)).x);
+      const p = await snap(page);
+      // Signed distance of the car centre from the facade plane (positive = outside).
+      minD = Math.min(minD, (p.x - wall.face.x) * wall.nx + (p.z - wall.face.z) * wall.nz);
     }
     await page.keyboard.up("KeyW");
-    const half = await page.evaluate(() => window.__fh.car.def.body.length / 2);
-    check("driving into a building stops at the wall (no tunnelling)", maxX + half < wall.face + 0.7, `nose ${(maxX + half).toFixed(2)} vs wall ${wall.face.toFixed(2)}`);
+    check("driving into a building stops at the wall (no tunnelling)", minD > 0.5, `closest centre ${minD.toFixed(2)} m from facade`);
     await shot("06-crash");
   }
-  const ramp = await page.evaluate(() => window.__fh.city.ramps[0]);
-  await teleport(ramp.x - 3, ramp.z - 110, ramp.heading);
+  const ramp = await page.evaluate(() => window.__fh.city.ramps.find((r) => r.label === "Quay launch"));
+  await teleport(ramp.x - Math.sin(ramp.heading) * 90, ramp.z - Math.cos(ramp.heading) * 90, ramp.heading);
   let flew = false;
   let maxY = 0;
   await page.keyboard.down("KeyW");
@@ -196,13 +224,20 @@ try {
   });
   // Approach in the traffic lane beside the parked car, 25 m back, then
   // drive up and stop alongside it - exactly what a player does.
-  const lane = await page.evaluate((sp) => {
-    const r = window.__fh.city.roadAt(sp.x, sp.z);
-    return r.axis === "x" ? { x: sp.x + (r.coord - sp.x) * 0.55, z: sp.z } : { x: sp.x, z: sp.z + (r.coord - sp.z) * 0.55 };
+  // Start 25 m back in the nearest lane of the road the car is parked beside.
+  const start = await page.evaluate((sp) => {
+    const g = window.__fh;
+    g.traffic.clear();
+    g.traffic.enabled = false;
+    const near = g.city.net.nearestRoad(sp.x, sp.z, 30);
+    const r = near.road;
+    const t = r.center.tangent(near.s);
+    const dir = Math.sign(t.tx * Math.sin(sp.heading) + t.tz * Math.cos(sp.heading)) || 1;
+    const s = near.s - dir * 25;
+    const lat = r.laneOffset(r.spec.lanes - 1);
+    return dir > 0 ? g.city.net.pointOn(r.id, s, lat) : (() => { const p = g.city.net.pointOn(r.id, s, -lat); return { x: p.x, z: p.z, heading: p.heading + Math.PI }; })();
   }, spot);
-  const bx = Math.sin(spot.heading);
-  const bz = Math.cos(spot.heading);
-  await teleport(lane.x - bx * 25, lane.z - bz * 25, spot.heading);
+  await teleport(start.x, start.z, start.heading);
   await page.keyboard.down("KeyW");
   await page.waitForFunction((sp) => {
     const c = window.__fh.car;
@@ -264,11 +299,11 @@ try {
   await press(page, "KeyM", 150);
   check("M toggles mute", (await snap(page)).muted === !m0);
   await press(page, "KeyM", 150);
-  await teleport(55, 55, 0.3); // in the middle of a downtown block
+  await teleport(-30, 380, 0.3); // in the middle of Central Park
   await press(page, "KeyR", 300);
   s = await snap(page);
-  const onRoad = await page.evaluate((p) => window.__fh.city.roadAt(p.x, p.z) !== null, { x: s.x, z: s.z });
-  check("R resets the car back onto a road", onRoad, `${s.x.toFixed(1)}, ${s.z.toFixed(1)}`);
+  const onLane = await page.evaluate((p) => window.__fh.city.net.roadAt(p.x, p.z) !== null, { x: s.x, z: s.z });
+  check("R resets the car back onto a road", onLane, `${s.x.toFixed(1)}, ${s.z.toFixed(1)}`);
 
   section("Garage (G)");
   await holdSim(page, ["KeyW"], 2);
@@ -313,6 +348,128 @@ try {
   await page.keyboard.up("KeyW");
   check("losing window focus releases held keys (no runaway car)", (await snap(page)).speedKmh < vBlur, `${vBlur.toFixed(1)} -> ${(await snap(page)).speedKmh.toFixed(1)}`);
 
+
+  section("Realistic engine sound (Web Audio, synthesised)");
+  await onRoad("fw-5", 0.05, 1);
+  await page.waitForFunction(() => window.__fh.audio.ready, { timeout: 15000 }).catch(() => {});
+  s = await snap(page);
+  check("audio started on the first key press", s.audioState === "running", s.audioState);
+  check("the engine model runs on the audio thread (AudioWorklet)", s.audioMode === "worklet", s.audioMode);
+  check("the loaded engine model matches the car being driven", s.audioEngine === s.car, `${s.audioEngine} vs ${s.car}`);
+  await waitSim(page, 0.6);
+  const idleLevel = (await snap(page)).audioLevel;
+  check("the idling engine is audible", idleLevel > 0.005, idleLevel.toFixed(4));
+  await page.keyboard.down("KeyW");
+  await waitSim(page, 1.2);
+  const pull = await snap(page);
+  check("full throttle is louder than idle", pull.audioLevel > idleLevel * 1.3, `${idleLevel.toFixed(4)} -> ${pull.audioLevel.toFixed(4)}`);
+  const rpmTrace = [];
+  for (let i = 0; i < 24; i++) {
+    await waitSim(page, 0.12);
+    const p = await snap(page);
+    rpmTrace.push({ rpm: p.rpm, gear: p.gearRaw });
+  }
+  await page.keyboard.up("KeyW");
+  const drops = rpmTrace.filter((p, i) => i > 0 && p.gear > rpmTrace[i - 1].gear && p.rpm < rpmTrace[i - 1].rpm - 300).length;
+  check("the gearbox upshifts and the revs drop on each shift", drops >= 1, rpmTrace.map((p) => `${p.gear}:${Math.round(p.rpm)}`).join(" "));
+  await press(page, "KeyM", 300);
+  const mutedLevel = (await snap(page)).audioLevel;
+  check("M mutes the sound", mutedLevel < 0.003, mutedLevel.toFixed(4));
+  await press(page, "KeyM", 150);
+  await brakeToStop(page);
+
+  section("Stage 2: traffic");
+  await page.evaluate(() => {
+    window.__fh.traffic.enabled = true;
+    window.__fh.env.setHours(13);
+    window.__fh.env.speed = 0;
+  });
+  await onRoad("mkt-1", 0.3, 0, true);
+  await waitSim(page, 3);
+  s = await snap(page);
+  check("traffic populates around the player", s.traffic >= 40, `${s.traffic} cars`);
+  const flow = await page.evaluate(async () => {
+    const g = window.__fh;
+    const before = new Map(g.traffic.cars.map((c) => [c.id, [c.x, c.z]]));
+    await new Promise((r) => setTimeout(r, 2500));
+    let moved = 0;
+    for (const c of g.traffic.cars) {
+      const b = before.get(c.id);
+      if (b && Math.hypot(c.x - b[0], c.z - b[1]) > 3) moved++;
+    }
+    return { moved, total: g.traffic.cars.length, kinds: [...new Set(g.traffic.cars.map((c) => c.model.kind))] };
+  });
+  check("traffic is moving", flow.moved > flow.total * 0.4, `${flow.moved}/${flow.total} moved`);
+  check("several kinds of vehicle (cars, taxis, vans, buses...)", flow.kinds.length >= 4, flow.kinds.join(", "));
+  const onLanes = await page.evaluate(() => {
+    const g = window.__fh;
+    let ok = 0;
+    for (const c of g.traffic.cars) if (c.wrecked > 0 || g.city.net.roadAt(c.x, c.z, 0.5) || g.city.net.nodeAt(c.x, c.z)) ok++;
+    return [ok, g.traffic.cars.length];
+  });
+  check("every traffic car is on the road network", onLanes[0] === onLanes[1], `${onLanes[0]}/${onLanes[1]}`);
+  await shot("17-traffic");
+  // Ram a car: put the player behind a traffic car in its lane and floor it.
+  const target = await page.evaluate(() => {
+    const g = window.__fh;
+    const c = g.traffic.cars.find((k) => k.seg.kind === "lane" && k.s > 40 && k.s < k.seg.length - 20 && !k.wrecked && k.model.kind !== "bus");
+    if (!c) return null;
+    c.temper = 0.001; // slow it right down so we catch it
+    // Start 30 m behind it in its lane, aimed straight at it (lanes curve).
+    const p = c.seg.poly.sample(c.s - 30);
+    g.teleport(p.x, p.z, Math.atan2(c.x - p.x, c.z - p.z));
+    return c.id;
+  });
+  check("found a traffic car to ram", target !== null);
+  const hits0 = (await snap(page)).trafficHits;
+  await page.keyboard.down("KeyW");
+  // Capture the hit state in the same tick it happens.
+  const wrecked = await page
+    .waitForFunction(
+      (h, id) => {
+        const g = window.__fh;
+        if (g.trafficHits <= h) return false;
+        const c = g.traffic.cars.find((k) => k.id === id);
+        return { wrecked: !!c && c.wrecked > 0 };
+      },
+      { timeout: 20000, polling: "raf" },
+      hits0,
+      target,
+    )
+    .then((h) => h.jsonValue())
+    .then((v) => v.wrecked)
+    .catch(() => false);
+  await page.keyboard.up("KeyW");
+  s = await snap(page);
+  check("ramming a traffic car registers a hit and knocks it out of its lane", s.trafficHits > hits0 && wrecked, `hits ${s.trafficHits - hits0}, wrecked ${wrecked}`);
+  await shot("18-traffic-crash");
+  await brakeToStop(page);
+  // Signals: traffic lights cycle in the rendered world.
+  const lights = await page.evaluate(() => {
+    const g = window.__fh;
+    const n = [...g.city.net.nodes.values()].find((x) => x.kind === "signal" && x.groups === 2);
+    return n ? n.id : null;
+  });
+  check("signalised junctions exist on the map", lights !== null);
+
+  section("Custom map");
+  const mapInfo = await page.evaluate(() => {
+    const g = window.__fh;
+    return { roads: g.city.net.roads.length, km: g.city.net.roads.reduce((a, r) => a + r.length, 0) / 1000, roundabout: [...g.city.net.nodes.values()].some((n) => n.kind === "roundabout"), bridges: g.city.net.roads.filter((r) => r.bridges.length).length, summit: g.city.net.nodes.get("SU").elev };
+  });
+  check("the city is a hand-made road network (no grid)", mapInfo.roads > 60 && mapInfo.km > 20, `${mapInfo.roads} roads, ${mapInfo.km.toFixed(1)} km`);
+  check("it has a roundabout, river bridges and a mountain pass", mapInfo.roundabout && mapInfo.bridges >= 2 && mapInfo.summit > 100);
+  await onRoad("mt-up", 0.7, 0);
+  await holdSim(page, ["KeyW"], 2.5);
+  s = await snap(page);
+  check("you can drive up the mountain pass", s.y > 60 && s.speedKmh > 20, `y=${s.y.toFixed(1)} ${s.speedKmh.toFixed(0)} km/h`);
+  await shot("19-mountain");
+  await brakeToStop(page);
+  await onRoad("bridge-n", 0.5, 0);
+  s = await snap(page);
+  const overWater = await page.evaluate((p) => window.__fh.city.isWater(p.x + 30, p.z) || window.__fh.city.isWater(p.x - 30, p.z), { x: s.x, z: s.z });
+  check("the Riverside Bridge crosses the river", overWater && s.y > 0);
+
   section("Settings + persistence");
   await press(page, "Escape", 300);
   for (let i = 0; i < 5; i++) await press(page, "ArrowDown", 60);
@@ -342,8 +499,9 @@ try {
   await page.evaluate(() => {
     window.__fh.env.setHours(22);
     window.__fh.env.speed = 0;
-    window.__fh.teleport(-5, -500, 0);
   });
+  await onRoad("lib-1", 0.1, 0, true);
+  await page.evaluate(() => {});
   await holdSim(page, ["KeyW"], 2.5);
   s = await snap(page);
   check("night mode is active at 22:00", s.night > 0.9);

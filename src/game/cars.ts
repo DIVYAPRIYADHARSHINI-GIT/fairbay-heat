@@ -63,7 +63,35 @@ export interface Handling {
   response: number;
   drive: Drive;
   /** Engine character for the synthesised sound. */
-  engine: { cylinders: number; idle: number; redline: number; tone: number };
+  engine: EngineSpec;
+}
+
+/**
+ * Physical description of the engine that the sound synthesiser models:
+ * cylinder count, firing pattern per exhaust bank, exhaust pipe lengths,
+ * muffler openness, forced induction and overrun crackle.
+ */
+export interface EngineSpec {
+  cylinders: number;
+  idle: number;
+  redline: number;
+  /** Which 720/N-degree firing slots feed each exhaust bank. Uneven slot
+   *  spacing within a bank (cross-plane V8) is what makes a V8 burble. */
+  banks: number[][];
+  /** Exhaust primary and tail pipe lengths, metres. */
+  pipes: [number, number];
+  /** Muffler cut-off at full throttle, Hz (higher = rawer, louder). */
+  muffler: number;
+  /** Number of turbochargers (0 = naturally aspirated). */
+  turbos: number;
+  /** Overrun pops and crackles, 0..1. */
+  crackle: number;
+  /** Intake roar mix, 0..1. */
+  intake: number;
+  /** Combustion randomness (lumpy cams = higher), 0..1. */
+  rough: number;
+  /** Exhaust header length mismatch between banks (0 = equal length). */
+  headerMismatch?: number;
 }
 
 export interface CarDef {
@@ -94,7 +122,7 @@ export const CARS: CarDef[] = [
     },
     handling: {
       zeroTo100: 4.2, topSpeed: 305, brake: 13, grip: 9, driftGrip: 2.4, cornering: 21,
-      response: 8, drive: "RWD", engine: { cylinders: 12, idle: 850, redline: 7000, tone: 0.55 },
+      response: 8, drive: "RWD", engine: { cylinders: 12, idle: 850, redline: 7000, banks: [[0, 2, 4, 6, 8, 10], [1, 3, 5, 7, 9, 11]], pipes: [0.9, 2.3], muffler: 2600, turbos: 0, crackle: 0.45, intake: 0.5, rough: 0.12 },
     },
   },
   {
@@ -112,7 +140,7 @@ export const CARS: CarDef[] = [
     },
     handling: {
       zeroTo100: 4.3, topSpeed: 304, brake: 14, grip: 10, driftGrip: 2.6, cornering: 23,
-      response: 9, drive: "RWD", engine: { cylinders: 6, idle: 900, redline: 7800, tone: 0.7 },
+      response: 9, drive: "RWD", engine: { cylinders: 6, idle: 900, redline: 7800, banks: [[0, 2, 4], [1, 3, 5]], pipes: [0.6, 1.7], muffler: 3200, turbos: 0, crackle: 0.35, intake: 0.75, rough: 0.1, headerMismatch: 0.15 },
     },
   },
   {
@@ -131,7 +159,7 @@ export const CARS: CarDef[] = [
     },
     handling: {
       zeroTo100: 4.8, topSpeed: 250, brake: 11.5, grip: 7.5, driftGrip: 1.9, cornering: 19,
-      response: 7, drive: "RWD", engine: { cylinders: 8, idle: 750, redline: 6800, tone: 0.35 },
+      response: 7, drive: "RWD", engine: { cylinders: 8, idle: 750, redline: 6800, banks: [[0, 2, 3, 5], [1, 4, 6, 7]], pipes: [0.8, 2.6], muffler: 1500, turbos: 0, crackle: 0.55, intake: 0.35, rough: 0.3, headerMismatch: 0.3 },
     },
   },
   {
@@ -150,7 +178,7 @@ export const CARS: CarDef[] = [
     },
     handling: {
       zeroTo100: 2.9, topSpeed: 350, brake: 15, grip: 11, driftGrip: 2.9, cornering: 25,
-      response: 9, drive: "AWD", engine: { cylinders: 12, idle: 1000, redline: 8500, tone: 0.75 },
+      response: 9, drive: "AWD", engine: { cylinders: 12, idle: 1000, redline: 8500, banks: [[0, 2, 4, 6, 8, 10], [1, 3, 5, 7, 9, 11]], pipes: [0.7, 1.5], muffler: 3800, turbos: 0, crackle: 0.85, intake: 0.6, rough: 0.12 },
     },
   },
   {
@@ -169,7 +197,7 @@ export const CARS: CarDef[] = [
     },
     handling: {
       zeroTo100: 3.2, topSpeed: 315, brake: 14, grip: 11, driftGrip: 3.2, cornering: 24,
-      response: 9, drive: "AWD", engine: { cylinders: 6, idle: 900, redline: 7100, tone: 0.5 },
+      response: 9, drive: "AWD", engine: { cylinders: 6, idle: 900, redline: 7100, banks: [[0, 2, 4], [1, 3, 5]], pipes: [1.0, 2.4], muffler: 1700, turbos: 2, crackle: 0.25, intake: 0.4, rough: 0.08, headerMismatch: 0.12 },
     },
   },
   {
@@ -188,7 +216,7 @@ export const CARS: CarDef[] = [
     },
     handling: {
       zeroTo100: 2.5, topSpeed: 407, brake: 15, grip: 10, driftGrip: 2.8, cornering: 24,
-      response: 8, drive: "AWD", engine: { cylinders: 16, idle: 900, redline: 6600, tone: 0.45 },
+      response: 8, drive: "AWD", engine: { cylinders: 16, idle: 900, redline: 6600, banks: [[0, 2, 4, 6, 8, 10, 12, 14], [1, 3, 5, 7, 9, 11, 13, 15]], pipes: [1.1, 2.8], muffler: 1400, turbos: 4, crackle: 0.15, intake: 0.35, rough: 0.06 },
     },
   },
 ];

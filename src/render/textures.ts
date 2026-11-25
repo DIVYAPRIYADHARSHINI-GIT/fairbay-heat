@@ -99,7 +99,7 @@ export function sidewalk(): THREE.CanvasTexture {
 export function grass(): THREE.CanvasTexture {
   const rng = mulberry32(13);
   const [c, ctx] = canvas(256);
-  noise(ctx, 256, 256, rng, 150, 70, [0.55, 0.85, 0.42]);
+  noise(ctx, 256, 256, rng, 150, 70, [0.62, 0.86, 0.36]);
   for (let i = 0; i < 1400; i++) {
     ctx.fillStyle = `rgba(${range(rng, 40, 90)},${range(rng, 90, 150)},${range(rng, 30, 60)},0.6)`;
     ctx.fillRect(rng() * 256, rng() * 256, 1, 2 + rng() * 3);

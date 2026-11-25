@@ -86,6 +86,14 @@ export class CarPhysics {
   /** Simulated engine for the HUD and sound. */
   rpm = 0;
   gear = 1;
+  /** Seconds left in the current gear change (clutch open). */
+  shiftT = 0;
+  shiftDir = 0;
+  shifts = 0;
+  /** True while bouncing off the rev limiter. */
+  limiter = false;
+  /** Engine load 0..1 (for the sound: on-throttle vs overrun). */
+  load = 0;
   throttle = 0;
 
   // --- derived constants -------------------------------------------------
@@ -191,7 +199,7 @@ export class CarPhysics {
         a -= this.engineAccel * 0.55 * c.brake * clamp(1 - -vLong / 9.5, 0, 1);
       }
       if (c.throttle > 0 && vLong >= -0.5) {
-        a += c.throttle * engineForce(this.engineAccel, vLong, vmax);
+        a += c.throttle * engineForce(this.engineAccel, vLong, vmax) * (this.shiftT > 0 ? 0.55 : 1);
         if (this.nitroActive) a += 7.5 * clamp(1 - vLong / vmax, 0.15, 1);
       } else if (c.throttle > 0 && vLong < -0.5) {
         a += h.brake * c.throttle; // throttle while rolling back = brake
@@ -201,6 +209,11 @@ export class CarPhysics {
       const offDrag = offroad ? 2.2 + 0.0015 * vLong * vLong : 0;
       const handbrakeDrag = c.handbrake ? (this.drifting ? 1.6 : 5) : 0;
       const resist = drag + offDrag + handbrakeDrag;
+      // Gravity along the slope: climbing slows you, descending speeds you up.
+      const ahead = world.ground(this.x + fx * 1.5, this.z + fz * 1.5);
+      const behind = world.ground(this.x - fx * 1.5, this.z - fz * 1.5);
+      const grade = clamp((ahead - behind) / 3, -0.4, 0.4);
+      a -= 9.81 * grade;
       const before = vLong;
       vLong += a * dt;
       // Resistances oppose motion but never reverse it.
@@ -324,7 +337,7 @@ export class CarPhysics {
     }
     this.pitch = damp(this.pitch, targetPitch, this.airborne ? 3 : 14, dt);
     this.wheelSpin += (vLong / this.def.body.wheelRadius) * dt;
-    this.updateEngine(c, vLong);
+    this.updateEngine(c, vLong, dt);
     return ev;
   }
 
@@ -340,8 +353,8 @@ export class CarPhysics {
         const cz = this.z + fz * off;
         for (const col of near) {
           if (col.kind === "circle" && col.broken) continue;
-          if (this.y > col.top) continue; // flying over it
-          if (col.kind === "box" && col.ramp && this.y > col.top * 0.4) continue; // on the ramp itself
+          if (this.y > col.base + col.top) continue; // flying over it
+          if (col.kind !== "circle" && col.ramp && this.y > col.base + col.top * 0.4) continue; // on the ramp itself
           const hit = collide(cx, cz, this.radius, col);
           if (!hit) continue;
           const vn = this.vx * hit.nx + this.vz * hit.nz;
@@ -392,24 +405,60 @@ export class CarPhysics {
     }
   }
 
-  private updateEngine(c: Controls, vLong: number): void {
+  /**
+   * Gearbox + engine speed. Gear ratios are geometric (like a real box), so
+   * each upshift drops the revs by a realistic ratio. Shifts happen at ~92%
+   * of redline under throttle (earlier when cruising), downshifts when revs
+   * fall low, and every shift takes a short time during which the clutch is
+   * open - the sound model uses `shiftT` to make the revs fall and catch.
+   */
+  private updateEngine(c: Controls, vLong: number, dt: number): void {
     const e = this.def.handling.engine;
-    const frac = clamp(Math.abs(vLong) / this.vmax, 0, 1);
-    // Six-speed box: gear bands get longer as speed rises.
-    const bands = [0, 0.12, 0.25, 0.4, 0.56, 0.74, 1.0];
-    let gear = 1;
-    while (gear < 6 && frac > bands[gear]) gear++;
-    const lo = bands[gear - 1];
-    const hi = bands[gear];
-    const within = clamp((frac - lo) / (hi - lo), 0, 1);
-    let target = e.idle + (e.redline - e.idle) * (0.38 + 0.6 * within);
-    if (frac < 0.02) target = c.throttle > 0 ? e.idle + (e.redline - e.idle) * 0.35 : e.idle;
-    if (this.airborne || (this.drifting && c.throttle > 0)) target = Math.max(target, e.redline * 0.88);
-    if (vLong < -0.5) gear = 0; // R
-    this.gear = gear;
-    this.rpm = this.rpm === 0 ? target : this.rpm + (target - this.rpm) * 0.2;
+    const v = Math.abs(vLong);
+    // Overall ratio: rpm per (m/s) in each gear. Top gear hits redline at vmax.
+    const ratios = GEAR_SPREAD.map((k) => (e.redline / this.vmax) * k);
+    const wheelRpm = (g: number) => v * ratios[g - 1];
+    this.shiftT = Math.max(0, this.shiftT - dt);
+    if (vLong < -0.5) this.gear = 0;
+    else if (this.gear === 0) this.gear = 1;
+    if (this.gear >= 1 && this.shiftT === 0 && !this.airborne) {
+      const r = wheelRpm(this.gear);
+      const up = c.throttle > 0 ? e.redline * 0.93 : e.redline * 0.55;
+      if (r > up && this.gear < 6) {
+        this.gear++;
+        this.shiftT = SHIFT_TIME;
+        this.shiftDir = 1;
+        this.shifts++;
+      } else if (this.gear > 1 && wheelRpm(this.gear - 1) < e.redline * (c.brake > 0 ? 0.8 : 0.62)) {
+        this.gear--;
+        this.shiftT = SHIFT_TIME * 0.7;
+        this.shiftDir = -1;
+        this.shifts++;
+      }
+    }
+    const g = Math.max(1, this.gear);
+    // Engine speed follows the wheels in gear; free-revs with the clutch
+    // open (launch, shifts, airborne, wheelspin in drifts).
+    let target = Math.max(e.idle, wheelRpm(g));
+    const launch = v < 6 && c.throttle > 0;
+    if (launch) target = Math.max(target, e.idle + (e.redline - e.idle) * 0.45);
+    if (this.drifting && c.throttle > 0) target = Math.min(e.redline, target * 1.18 + 600);
+    if (this.airborne && c.throttle > 0) target = e.redline;
+    let rate = 9;
+    if (this.shiftT > 0) {
+      // Clutch open: revs fall freely (or blip up on a downshift).
+      target = this.shiftDir > 0 ? Math.max(e.idle, this.rpm * 0.9) : Math.min(e.redline, target * 1.08);
+      rate = 14;
+    }
+    this.limiter = c.throttle > 0 && target >= e.redline * 0.995;
+    target = Math.min(target, e.redline);
+    this.rpm = this.rpm === 0 ? target : this.rpm + (target - this.rpm) * (1 - Math.exp(-rate * dt));
+    this.load = c.throttle > 0 ? (this.shiftT > 0 ? 0.15 : 1) : 0;
   }
 }
+
+export const GEAR_SPREAD = [3.35, 2.25, 1.68, 1.33, 1.13, 1.0];
+export const SHIFT_TIME = 0.16;
 
 /** Engine thrust curve: full at standstill, tapering to zero at vmax. */
 export function engineForce(peak: number, v: number, vmax: number): number {

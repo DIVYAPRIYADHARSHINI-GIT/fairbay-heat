@@ -11,8 +11,10 @@ export interface BoxCollider {
   maxX: number;
   minZ: number;
   maxZ: number;
-  /** Height of the obstacle's top; a car flying higher passes over it. */
+  /** Height of the obstacle above its base; a car flying higher passes over it. */
   top: number;
+  /** Ground height at the obstacle's foot. */
+  base: number;
   /** Back face of a jump ramp: ignored by a car already driving up it. */
   ramp?: boolean;
 }
@@ -24,12 +26,30 @@ export interface CircleCollider {
   z: number;
   r: number;
   top: number;
+  base: number;
   /** Breakable props (lamp posts) get knocked over instead of stopping the car. */
   breakable: boolean;
   broken: boolean;
 }
 
-export type Collider = BoxCollider | CircleCollider;
+/** Oriented box (rotated building, container stack, barrier piece). */
+export interface OBBCollider {
+  kind: "obb";
+  id: number;
+  cx: number;
+  cz: number;
+  /** Half extents along the box axis (c, s) and its perpendicular (-s, c). */
+  hx: number;
+  hz: number;
+  c: number;
+  s: number;
+  top: number;
+  base: number;
+  /** Back face of a jump ramp: ignored by a car already driving up it. */
+  ramp?: boolean;
+}
+
+export type Collider = BoxCollider | CircleCollider | OBBCollider;
 
 export interface Contact {
   /** Unit normal pointing from the obstacle towards the circle. */
@@ -73,8 +93,31 @@ export function circleVsCircle(x: number, z: number, r: number, c: CircleCollide
   return { nx: dx / d, nz: dz / d, depth: rr - d };
 }
 
+/** Circle vs oriented box: solved in the box's local frame. */
+export function circleVsOBB(x: number, z: number, r: number, b: OBBCollider): Contact | null {
+  const dx = x - b.cx;
+  const dz = z - b.cz;
+  const u = dx * b.c + dz * b.s;
+  const v = -dx * b.s + dz * b.c;
+  const local: BoxCollider = { kind: "box", id: 0, minX: -b.hx, maxX: b.hx, minZ: -b.hz, maxZ: b.hz, top: 0, base: 0 };
+  const hit = circleVsBox(u, v, r, local);
+  if (!hit) return null;
+  // Rotate the normal back to world space.
+  return { nx: hit.nx * b.c - hit.nz * b.s, nz: hit.nx * b.s + hit.nz * b.c, depth: hit.depth };
+}
+
 export function collide(x: number, z: number, r: number, c: Collider): Contact | null {
-  return c.kind === "box" ? circleVsBox(x, z, r, c) : circleVsCircle(x, z, r, c);
+  if (c.kind === "box") return circleVsBox(x, z, r, c);
+  if (c.kind === "obb") return circleVsOBB(x, z, r, c);
+  return circleVsCircle(x, z, r, c);
+}
+
+export function colliderBounds(c: Collider): [number, number, number, number] {
+  if (c.kind === "box") return [c.minX, c.maxX, c.minZ, c.maxZ];
+  if (c.kind === "circle") return [c.x - c.r, c.x + c.r, c.z - c.r, c.z + c.r];
+  const ex = Math.abs(c.c) * c.hx + Math.abs(c.s) * c.hz;
+  const ez = Math.abs(c.s) * c.hx + Math.abs(c.c) * c.hz;
+  return [c.cx - ex, c.cx + ex, c.cz - ez, c.cz + ez];
 }
 
 export class SpatialHash {
@@ -91,8 +134,7 @@ export class SpatialHash {
 
   add(c: Collider): void {
     this.all.push(c);
-    const [minX, maxX, minZ, maxZ] =
-      c.kind === "box" ? [c.minX, c.maxX, c.minZ, c.maxZ] : [c.x - c.r, c.x + c.r, c.z - c.r, c.z + c.r];
+    const [minX, maxX, minZ, maxZ] = colliderBounds(c);
     const s = this.cellSize;
     for (let ix = Math.floor(minX / s); ix <= Math.floor(maxX / s); ix++) {
       for (let iz = Math.floor(minZ / s); iz <= Math.floor(maxZ / s); iz++) {

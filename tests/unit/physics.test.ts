@@ -207,7 +207,7 @@ describe("fixed timestep independence", () => {
 describe("collisions", () => {
   function wall(): World {
     const h = new SpatialHash();
-    const w: BoxCollider = { kind: "box", id: 1, minX: -50, maxX: 50, minZ: 40, maxZ: 45, top: 20 };
+    const w: BoxCollider = { kind: "box", id: 1, minX: -50, maxX: 50, minZ: 40, maxZ: 45, top: 20, base: 0 };
     h.add(w);
     return flatWorld(h);
   }
@@ -243,7 +243,7 @@ describe("collisions", () => {
 
   it("lamp posts break instead of stopping the car", () => {
     const h = new SpatialHash();
-    h.add({ kind: "circle", id: 2, x: 0, z: 30, r: 0.22, top: 7, breakable: true, broken: false });
+    h.add({ kind: "circle", id: 2, x: 0, z: 30, r: 0.22, top: 7, base: 0, breakable: true, broken: false });
     const car = new CarPhysics(carById("carrara"));
     const w = flatWorld(h);
     const broken: unknown[] = [];

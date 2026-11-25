@@ -10,7 +10,7 @@
 import * as THREE from "three";
 import { clamp, damp, dampAngle } from "../core/math";
 import type { CarPhysics } from "../game/physics";
-import { circleVsBox, type SpatialHash, type Collider } from "../game/collision";
+import { collide, type SpatialHash, type Collider } from "../game/collision";
 
 export const CAMERA_MODES = ["Chase", "Far chase", "Bumper"] as const;
 
@@ -114,8 +114,8 @@ export class CameraRig {
       const y = ry + (want.y - ry) * t;
       let blocked = false;
       for (const c of near) {
-        if (c.kind !== "box" || c.top < y || c.top > 900) continue;
-        if (circleVsBox(x, z, 0.4, c)) {
+        if (c.kind === "circle" || c.base + c.top < y || c.top > 900) continue;
+        if (collide(x, z, 0.4, c)) {
           blocked = true;
           break;
         }

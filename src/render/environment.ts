@@ -29,9 +29,9 @@ const KEYS: Key[] = [
   { t: 0, sun: "#8fa6e0", sunI: 0.55, hemiSky: "#4a5c92", hemiGround: "#262c3a", hemiI: 0.85, fog: "#121a2e", exposure: 1.0, turbidity: 2, rayleigh: 0.2 },
   { t: 5.2, sun: "#8fa6e0", sunI: 0.5, hemiSky: "#4d5a8a", hemiGround: "#262a36", hemiI: 0.8, fog: "#1c2236", exposure: 0.9, turbidity: 2, rayleigh: 0.3 },
   { t: 6.4, sun: "#ff9a5a", sunI: 0.99, hemiSky: "#c48a7a", hemiGround: "#3a2e2a", hemiI: 0.29, fog: "#d79a7e", exposure: 0.95, turbidity: 6, rayleigh: 2.6 },
-  { t: 8.5, sun: "#ffe0b8", sunI: 1.67, hemiSky: "#a9c8ec", hemiGround: "#5a5248", hemiI: 0.39, fog: "#b8cde0", exposure: 0.85, turbidity: 3.5, rayleigh: 1.4 },
-  { t: 13, sun: "#fff4e0", sunI: 1.92, hemiSky: "#a9cdf2", hemiGround: "#5e574c", hemiI: 0.41, fog: "#b9d1e6", exposure: 0.8, turbidity: 3, rayleigh: 1.1 },
-  { t: 17, sun: "#ffd6a0", sunI: 1.67, hemiSky: "#a8c0e0", hemiGround: "#5c5246", hemiI: 0.37, fog: "#c8c8cc", exposure: 0.85, turbidity: 4.5, rayleigh: 1.6 },
+  { t: 8.5, sun: "#ffe0b8", sunI: 1.67, hemiSky: "#a9c8ec", hemiGround: "#5a5248", hemiI: 0.39, fog: "#a9c4dd", exposure: 0.85, turbidity: 2.4, rayleigh: 1.0 },
+  { t: 13, sun: "#fff4e0", sunI: 1.92, hemiSky: "#a9cdf2", hemiGround: "#5e574c", hemiI: 0.41, fog: "#a6c3df", exposure: 0.8, turbidity: 2, rayleigh: 0.85 },
+  { t: 17, sun: "#ffd6a0", sunI: 1.67, hemiSky: "#a8c0e0", hemiGround: "#5c5246", hemiI: 0.37, fog: "#b4bfcc", exposure: 0.85, turbidity: 2.8, rayleigh: 1.2 },
   { t: 18.9, sun: "#ff7a3a", sunI: 1.05, hemiSky: "#b77a78", hemiGround: "#3a2a28", hemiI: 0.29, fog: "#d98b6a", exposure: 0.95, turbidity: 8, rayleigh: 3 },
   { t: 20.1, sun: "#8f86d0", sunI: 0.5, hemiSky: "#525487", hemiGround: "#262430", hemiI: 0.8, fog: "#2a2840", exposure: 0.95, turbidity: 2, rayleigh: 0.6 },
   { t: 24, sun: "#8fa6e0", sunI: 0.55, hemiSky: "#4a5c92", hemiGround: "#262c3a", hemiI: 0.85, fog: "#121a2e", exposure: 1.0, turbidity: 2, rayleigh: 0.2 },
@@ -172,8 +172,8 @@ export class Environment {
     u.sunPosition.value.copy(elev);
     u.turbidity.value = k.turbidity;
     u.rayleigh.value = k.rayleigh;
-    u.mieCoefficient.value = 0.004;
-    u.mieDirectionalG.value = 0.85;
+    u.mieCoefficient.value = 0.0016;
+    u.mieDirectionalG.value = 0.75;
     u.time.value = timeSeconds;
     u.cloudCoverage.value = lerp(0.35, 0.2, this.night);
     this.stars.material.opacity = this.night;
@@ -194,8 +194,8 @@ export class Environment {
     this.hemi.groundColor.set(k.hemiGround);
     this.hemi.intensity = k.hemiI;
     this.fog.color.set(k.fog);
-    this.fog.near = lerp(380, 160, this.night);
-    this.fog.far = lerp(2600, 1300, this.night);
+    this.fog.near = lerp(600, 180, this.night);
+    this.fog.far = lerp(3400, 1400, this.night);
     this.renderer.toneMappingExposure = k.exposure;
 
     if (Math.abs(this.hours - this.lastEnvHours) > 0.25 || this.envRT === null) {

@@ -4,20 +4,25 @@
  * toasts, district banner, drift counter and the "press E" prompt.
  */
 
-import { CITY_EDGE, SEAWALL_Z, WORLD, type City } from "../game/city";
+import { WORLD_HALF as WORLD, coastN, freshWaterDistance, type World } from "../game/world";
 import type { JackSpot } from "../game/jack";
 import { carById } from "../game/cars";
 import { clamp } from "../core/math";
 
-const MAP_SCALE = 0.75; // px per metre in the pre-rendered map
+const MAP_SCALE = 0.8; // px per metre in the pre-rendered map
 
 const DISTRICT_TINT: Record<string, string> = {
-  downtown: "#2b3442",
-  midtown: "#2e3540",
-  northshore: "#2c3a33",
-  park: "#2f4a2c",
+  downtown: "#2f3744",
+  midtown: "#2d3440",
+  oldtown: "#3a3230",
+  southside: "#30343a",
+  park: "#2c4a2a",
+  hillcrest: "#2c3b2e",
+  westside: "#2d3a30",
   ironworks: "#3a3631",
   port: "#33363b",
+  beach: "#4c4632",
+  highlands: "#2b3a27",
 };
 
 export function el<K extends keyof HTMLElementTagNameMap>(tag: K, cls = "", text = ""): HTMLElementTagNameMap[K] {
@@ -46,7 +51,7 @@ export class Hud {
 
   constructor(
     parent: HTMLElement,
-    private city: City,
+    private city: World,
   ) {
     this.root = el("div", "hud");
     this.root.setAttribute("aria-hidden", "true");
@@ -98,39 +103,107 @@ export class Hud {
     const c = el("canvas");
     c.width = c.height = S;
     const g = c.getContext("2d")!;
-    g.fillStyle = "#24331f";
-    g.fillRect(0, 0, S, S);
-    // Sea.
-    const [, seaY] = Hud.toMap(0, SEAWALL_Z);
-    g.fillStyle = "#123247";
-    g.fillRect(0, seaY, S, S - seaY);
-    // City base (roads colour).
-    const [ax, ay] = Hud.toMap(CITY_EDGE, CITY_EDGE);
-    const [bx, by] = Hud.toMap(-CITY_EDGE, -CITY_EDGE);
-    g.fillStyle = "#6c7480";
-    g.fillRect(ax, ay, bx - ax, by - ay);
-    // Blocks.
-    for (const b of this.city.blocks) {
-      const [x0, y0] = Hud.toMap(b.maxX, b.maxZ);
-      const [x1, y1] = Hud.toMap(b.minX, b.minZ);
-      g.fillStyle = b.plaza ? "#3c4a3a" : DISTRICT_TINT[b.district];
-      g.fillRect(x0, y0, x1 - x0, y1 - y0);
+    // Land / water / districts, sampled on a coarse grid.
+    const step = 8;
+    for (let py = 0; py < S; py += step) {
+      for (let px = 0; px < S; px += step) {
+        const x = WORLD - (px + step / 2) / MAP_SCALE;
+        const z = WORLD - (py + step / 2) / MAP_SCALE;
+        const e = -x;
+        let col: string;
+        if (z < coastN(e) || freshWaterDistance(e, z) < 0) col = "#163a52";
+        else {
+          const d = this.city.districtOf(x, z);
+          col = DISTRICT_TINT[d] ?? "#2a3826";
+          const h = this.city.terrainAt(x, z);
+          if (h > 60) col = h > 115 ? "#59605c" : "#34432f";
+        }
+        g.fillStyle = col;
+        g.fillRect(px, py, step, step);
+      }
     }
     // Buildings.
-    g.fillStyle = "rgba(255,255,255,0.08)";
-    for (const bd of this.city.buildings) {
-      const t = bd.tiers[0];
-      const [x0, y0] = Hud.toMap(t.maxX, t.maxZ);
-      const [x1, y1] = Hud.toMap(t.minX, t.minZ);
-      g.fillRect(x0, y0, x1 - x0, y1 - y0);
+    g.fillStyle = "rgba(255,255,255,0.09)";
+    for (const b of this.city.buildings) {
+      const pts = [
+        [b.box.hx, b.box.hz],
+        [-b.box.hx, b.box.hz],
+        [-b.box.hx, -b.box.hz],
+        [b.box.hx, -b.box.hz],
+      ].map(([u, v]) => Hud.toMap(b.box.cx + u * b.box.c - v * b.box.s, b.box.cz + u * b.box.s + v * b.box.c));
+      g.beginPath();
+      g.moveTo(pts[0][0], pts[0][1]);
+      for (const p of pts.slice(1)) g.lineTo(p[0], p[1]);
+      g.closePath();
+      g.fill();
+    }
+    // Roads: casing then fill, widest last so freeways sit on top.
+    const roads = [...this.city.net.roads].sort((a, b) => a.hw - b.hw);
+    const stroke = (lw: number, color: string, filter: (r: (typeof roads)[number]) => boolean) => {
+      g.strokeStyle = color;
+      g.lineCap = "round";
+      g.lineJoin = "round";
+      for (const r of roads) {
+        if (!filter(r)) continue;
+        g.lineWidth = Math.max(2, r.hw * 2 * MAP_SCALE) + lw;
+        g.beginPath();
+        const cl = r.center;
+        for (let i = 0; i < cl.n; i++) {
+          const [x, y] = Hud.toMap(cl.x[i], cl.z[i]);
+          if (i === 0) g.moveTo(x, y);
+          else g.lineTo(x, y);
+        }
+        g.stroke();
+      }
+    };
+    stroke(3, "rgba(0,0,0,0.55)", () => true);
+    stroke(0, "#8a919c", (r) => r.cls !== "freeway" && r.cls !== "mountain" && r.cls !== "coast");
+    stroke(0, "#b39a63", (r) => r.cls === "mountain" || r.cls === "coast");
+    stroke(0, "#d9a441", (r) => r.cls === "freeway");
+    // Junction discs.
+    for (const n of this.city.net.nodes.values()) {
+      if (n.kind === "roundabout") continue;
+      const [x, y] = Hud.toMap(n.x, n.z);
+      g.fillStyle = n.ends.some((e) => e.road.cls === "freeway") ? "#d9a441" : "#8a919c";
+      g.beginPath();
+      g.arc(x, y, Math.max(2, n.radius * MAP_SCALE * 0.7), 0, Math.PI * 2);
+      g.fill();
+    }
+    // Roundabout island.
+    {
+      const [x, y] = Hud.toMap(this.city.circle.x, this.city.circle.z);
+      g.fillStyle = "#3d6b3a";
+      g.beginPath();
+      g.arc(x, y, this.city.islandR * MAP_SCALE, 0, Math.PI * 2);
+      g.fill();
     }
     // Ramps.
     g.fillStyle = "#ffb000";
     for (const r of this.city.ramps) {
       const [x, y] = Hud.toMap(r.x, r.z);
       g.beginPath();
-      g.arc(x, y, 3, 0, Math.PI * 2);
+      g.arc(x, y, 4, 0, Math.PI * 2);
       g.fill();
+    }
+    // Labels.
+    g.font = "600 15px system-ui, sans-serif";
+    g.textAlign = "center";
+    g.fillStyle = "rgba(255,255,255,0.55)";
+    const labels: [string, number, number][] = [
+      ["DOWNTOWN", -120, 140],
+      ["OLD TOWN", -330, 820],
+      ["HILLCREST", 300, 560],
+      ["IRONWORKS", -820, -80],
+      ["PORT FAIRBAY", -620, -720],
+      ["SUNSET BEACH", 300, -800],
+      ["WESTSIDE", 1040, -100],
+      ["MOUNT CALDER", 880, 1080],
+      ["CENTRAL PARK", 60, 410],
+      ["SOUTHSIDE", 60, -470],
+    ];
+    for (const [t, x, z] of labels) {
+      const [px, py] = Hud.toMap(x, z);
+      g.fillText(t, px, py);
     }
     return c;
   }

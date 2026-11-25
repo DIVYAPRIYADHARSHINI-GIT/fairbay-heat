@@ -14,14 +14,16 @@ import { OutputPass } from "three/examples/jsm/postprocessing/OutputPass.js";
 import { Input } from "../core/input";
 import { clamp, damp, lerp, wrapAngle } from "../core/math";
 import { CARS, carById, ratings, type CarDef } from "./cars";
-import { City, DISTRICT_NAMES, SEAWALL_Z } from "./city";
+import { World, DISTRICT_NAMES, type District } from "./world";
+import { Traffic } from "./traffic";
 import { CarPhysics, NO_CONTROLS, type Controls } from "./physics";
-import { JACK_SPOTS, jackable, type JackSpot } from "./jack";
+import { JACK_SPOTS, JACK_SPOT_DEFS, jackable, setJackSpots, type JackSpot } from "./jack";
 import { DriftScore, JumpTracker, MIN_JUMP } from "./scoring";
 import { defaults, loadSave, writeSave, type Quality, type SaveData } from "./save";
 import type { CircleCollider } from "./collision";
 import { buildCar, poseCar, type CarVisual } from "../render/carModel";
-import { buildCityView, type CityView } from "../render/cityMesh";
+import { buildWorldView, type WorldView } from "../render/worldMesh";
+import { TrafficView } from "../render/trafficView";
 import { Environment } from "../render/environment";
 import { Effects } from "../render/effects";
 import { CameraRig, CAMERA_MODES } from "../render/cameraRig";
@@ -58,7 +60,8 @@ export class Game {
   readonly renderer: THREE.WebGLRenderer;
   readonly scene = new THREE.Scene();
   readonly camera = new THREE.PerspectiveCamera(62, 1, 0.3, 9000);
-  readonly city: City;
+  readonly city: World;
+  readonly traffic: Traffic;
   readonly input: Input;
   readonly audio = new GameAudio();
   readonly rig: CameraRig;
@@ -66,7 +69,8 @@ export class Game {
   carVisual!: CarVisual;
   hud!: Hud;
   env!: Environment;
-  cityView!: CityView;
+  cityView!: WorldView;
+  trafficView!: TrafficView;
   effects!: Effects;
   parked: ParkedCar[] = [];
   /** Jack spot whose car the player is currently driving (hidden from the street). */
@@ -102,6 +106,7 @@ export class Game {
   private distanceM = 0;
   private stuckTime = 0;
   private lastImpactSound = 0;
+  trafficHits = 0;
   readonly errors: string[] = [];
 
   constructor(private container: HTMLElement) {
@@ -117,7 +122,9 @@ export class Game {
     this.renderer.domElement.className = "game-canvas";
     this.renderer.domElement.setAttribute("aria-label", "Fairbay Heat - 3D driving game");
     container.appendChild(this.renderer.domElement);
-    this.city = new City();
+    this.city = new World({ jackSpots: JACK_SPOT_DEFS });
+    setJackSpots(this.city.jackSpots);
+    this.traffic = new Traffic(this.city.net, 77, this.city.ground);
     this.input = new Input(window);
     this.rig = new CameraRig(this.camera);
     this.rig.mode = this.save.camera;
@@ -137,10 +144,12 @@ export class Game {
     this.env.speed = this.save.timeSpeed;
     progress(0.25, "Raising Fairbay");
     await tick();
-    this.cityView = buildCityView(this.city, Math.min(8, this.renderer.capabilities.getMaxAnisotropy()));
+    this.cityView = buildWorldView(this.city, Math.min(8, this.renderer.capabilities.getMaxAnisotropy()));
     this.scene.add(this.cityView.group);
     progress(0.6, "Parking the cars");
     await tick();
+    this.trafficView = new TrafficView();
+    this.scene.add(this.trafficView.group);
     this.effects = new Effects();
     this.scene.add(this.effects.group, this.effects.speedLines);
     for (const spot of JACK_SPOTS) this.addParked(spot);
@@ -153,7 +162,7 @@ export class Game {
       const safe = this.city.nearestRoadPoint(p.x, p.z);
       // Resume where the player parked, but only if it is still a free spot.
       const free = this.city.colliders.query(p.x, p.z, 4).every((c) => c.kind === "circle" && c.breakable);
-      if (free && p.z > SEAWALL_Z + 5) this.car.place(p.x, p.z, p.heading, this.city.ground(p.x, p.z));
+      if (free && !this.city.isWater(p.x, p.z) && this.city.surface(p.x, p.z) === "road") this.car.place(p.x, p.z, p.heading, this.city.ground(p.x, p.z));
       else this.car.place(safe.x, safe.z, safe.heading);
     }
     this.snapPrev();
@@ -187,7 +196,7 @@ export class Game {
   private addParked(spot: JackSpot): void {
     const def = carById(spot.carId);
     const visual = buildCar(def, def.colors[spot.color]);
-    visual.root.position.set(spot.x, 0, spot.z);
+    visual.root.position.set(spot.x, this.city.ground(spot.x, spot.z), spot.z);
     visual.root.rotation.y = spot.heading;
     visual.root.traverse((o) => {
       if (o instanceof THREE.Mesh) o.castShadow = true;
@@ -205,6 +214,7 @@ export class Game {
       z: spot.z + fz * o,
       r,
       top: def.body.height,
+      base: this.city.ground(spot.x, spot.z),
       breakable: false,
       broken: false,
     }));
@@ -229,7 +239,8 @@ export class Game {
       this.car.place(old.x, old.z, old.heading, old.y);
       this.car.nitro = old.nitro;
     } else {
-      this.car.place(City.SPAWN.x, City.SPAWN.z, City.SPAWN.heading);
+      const sp = this.city.spawn;
+      this.car.place(sp.x, sp.z, sp.heading, this.city.ground(sp.x, sp.z));
     }
     if (this.carVisual) {
       this.scene.remove(this.carVisual.root);
@@ -244,6 +255,7 @@ export class Game {
     this.save.carId = def.id;
     this.save.colorIndex = colorIndex;
     this.hud?.setCarName(def.name, def.klass);
+    this.audio.setEngine(def.id, def.handling.engine);
     this.drift.reset();
     this.jump.cancel();
     this.rig.snap();
@@ -712,7 +724,8 @@ export class Game {
     if (this.hiddenSpot) this.setParkedVisible(this.hiddenSpot, true);
     this.hiddenSpot = null;
     this.spawnPlayer("mustanger", 0);
-    this.car.place(City.SPAWN.x, City.SPAWN.z, City.SPAWN.heading);
+    const sp = this.city.spawn;
+    this.car.place(sp.x, sp.z, sp.heading, this.city.ground(sp.x, sp.z));
     this.snapPrev();
     this.cityView.resetLamps();
     this.persist();
@@ -760,12 +773,14 @@ export class Game {
       while (this.acc >= STEP && steps < 24) {
         this.snapPrev();
         const ev = this.car.step(STEP, c, this.city.world);
+        this.applyTrafficHits(this.traffic.collide(this.playerState()));
         this.simTime += STEP;
         this.acc -= STEP;
         steps++;
         this.handleStepEvents(ev, c);
       }
       if (steps === 24) this.acc = 0; // way behind: drop time rather than spiral
+      this.stepTraffic(dt);
       this.gameplay(dt, c);
     }
 
@@ -806,11 +821,16 @@ export class Game {
     this.env.update(this.state === "drive" || this.state === "title" ? dt : 0, focus, time);
     const night = this.env.night;
     this.cityView.setNight(night);
-    this.cityView.update(time, this.camera);
+    this.trafficView.setNight(night);
+    this.trafficView.update(this.traffic.cars, time);
+    this.cityView.update(time, this.traffic.time);
     if (this.bloom.enabled) {
       // By day only very hot highlights bloom; at night lights and windows do.
-      this.bloom.strength = lerp(0.18, 0.55, night);
-      this.bloom.threshold = lerp(2.4, 0.95, night);
+      // The bright daytime sky sits near 1.0 after tone mapping, so a day
+      // bloom smears it over everything. Bloom is a night effect (lamps,
+      // windows, tail lights): off by day, fading in at dusk.
+      this.bloom.strength = lerp(0, 0.55, night);
+      this.bloom.threshold = 0.95;
     }
     this.effects.update(this.state === "drive" ? dt : 0, time, this.state === "drive" ? this.car.speed / this.car.vmax : 0, this.camera);
 
@@ -845,17 +865,21 @@ export class Game {
     }
     this.audio.update({
       rpm: this.car.rpm,
-      cylinders: this.car.def.handling.engine.cylinders,
-      tone: this.car.def.handling.engine.tone,
-      throttle: this.car.throttle,
+      load: this.car.load,
+      limiter: this.car.limiter,
       speed: this.car.speed,
       slip: this.car.slipAngle,
       grounded: !this.car.airborne,
-      nitro: this.car.nitroActive,
+      offroad: this.car.surface === "offroad",
+      braking: this.car.braking,
+      enclosure: this.enclosure(),
       paused: this.state !== "drive",
+      camera: this.rig.mode,
     });
+    if (this.state === "drive") this.audio.updateTraffic(this.trafficSounds());
+    else this.audio.updateTraffic([]);
 
-    if (this.bloom.enabled) this.composer.render(dt);
+    if (this.bloom.enabled && this.bloom.strength > 0.01) this.composer.render(dt);
     else this.renderer.render(this.scene, this.camera);
     this.input.endFrame();
   }
@@ -893,7 +917,7 @@ export class Game {
     }
     if (ev.landed > 4) {
       this.rig.bump(clamp(ev.landed / 20, 0, 0.8));
-      this.audio.impact(clamp(ev.landed / 30, 0.1, 0.6));
+      this.audio.land(clamp(ev.landed / 20, 0.1, 0.8));
     }
     // Drift scoring (once per step).
     const banked = this.drift.update(STEP, this.car.drifting || Math.abs(this.car.slipAngle) > 0.25, this.car.speed, this.car.slipAngle, ev.impact);
@@ -920,7 +944,7 @@ export class Game {
     // District banner.
     const d = this.city.districtOf(car.x, car.z);
     if (d !== this.district) {
-      if (this.district !== "" && d !== "sea") this.hud.showBanner(d === "hills" ? "Fairbay Hills" : DISTRICT_NAMES[d]);
+      if (this.district !== "" && d !== "sea" && d !== "river") this.hud.showBanner(DISTRICT_NAMES[d as District]);
       this.district = d;
     }
 
@@ -1031,6 +1055,96 @@ export class Game {
     if (this.state === "map") this.drawMap();
   }
 
+  /** How built-up the surroundings are (0 open country .. 1 city canyon), for reverb. */
+  private enclosure(): number {
+    const d = this.city.districtOf(this.car.x, this.car.z);
+    if (d === "downtown") return 1;
+    if (d === "midtown" || d === "oldtown") return 0.7;
+    if (d === "southside" || d === "ironworks" || d === "port") return 0.45;
+    return 0.1;
+  }
+
+  private playerState() {
+    const car = this.car;
+    return { x: car.x, z: car.z, vx: car.vx, vz: car.vz, heading: car.heading, radius: car.radius, length: car.def.body.length };
+  }
+
+  /** Steps traffic AI once per frame (collisions are handled per physics sub-step). */
+  private stepTraffic(dt: number): void {
+    const car = this.car;
+    const ev = this.traffic.step(Math.min(dt, 0.05), this.playerState(), car.x, car.z, this.renderHeading);
+    this.applyTrafficHits(ev);
+  }
+
+  private applyTrafficHits(ev: { hits: { car: { x: number; z: number }; impact: number; x: number; z: number }[]; horns: { car: { x: number; z: number }; long: boolean }[] }): void {
+    const car = this.car;
+    for (const h of ev.hits) {
+      // The player's car loses some speed and gets nudged away.
+      const s = clamp(h.impact / 25, 0, 1);
+      const dx = car.x - h.car.x;
+      const dz = car.z - h.car.z;
+      const d = Math.hypot(dx, dz) || 1;
+      const nx = dx / d;
+      const nz = dz / d;
+      const vn = car.vx * nx + car.vz * nz;
+      if (vn < 0) {
+        car.vx -= vn * nx * 1.2;
+        car.vz -= vn * nz * 1.2;
+      }
+      car.vx *= 1 - 0.18 * s;
+      car.vz *= 1 - 0.18 * s;
+      car.x += nx * 0.15;
+      car.z += nz * 0.15;
+      if (h.impact > 2) {
+        if (this.simTime - this.lastImpactSound > 0.12) {
+          this.audio.impact(clamp(s * 1.2, 0.15, 1));
+          this.lastImpactSound = this.simTime;
+        }
+        this.rig.bump(s * 0.8);
+        for (let i = 0; i < 6 + s * 24; i++) {
+          this.effects.sparks.emit(h.x, car.y + 0.5 + Math.random() * 0.4, h.z, (Math.random() - 0.5) * 8, Math.random() * 4 + 1, (Math.random() - 0.5) * 8, 0.3 + Math.random() * 0.3, 0.13, -0.1, 1, 0.8, 0.4);
+        }
+        this.trafficHits++;
+        if (this.drift.points > 0 && h.impact > 7) this.drift.reset();
+      }
+    }
+    for (const hn of ev.horns) {
+      const [right, fwd] = this.relative(hn.car.x, hn.car.z);
+      this.audio.horn(right, fwd, hn.long);
+    }
+  }
+
+  /** (right, forward) offset of a world point from the camera's view. */
+  private relative(x: number, z: number): [number, number] {
+    const h = this.renderHeading;
+    const dx = x - this.renderPos.x;
+    const dz = z - this.renderPos.z;
+    const fx = Math.sin(h);
+    const fz = Math.cos(h);
+    return [dx * -fz + dz * fx, dx * fx + dz * fz];
+  }
+
+  private trafficSounds() {
+    const out = [];
+    const pvx = this.car.vx;
+    const pvz = this.car.vz;
+    const near = [...this.traffic.cars]
+      .map((c) => ({ c, d: Math.hypot(c.x - this.car.x, c.z - this.car.z) }))
+      .filter((o) => o.d < 70)
+      .sort((a, b) => a.d - b.d)
+      .slice(0, 6);
+    for (const { c, d } of near) {
+      const [right, fwd] = this.relative(c.x, c.z);
+      const cvx = Math.sin(c.heading) * c.v;
+      const cvz = Math.cos(c.heading) * c.v;
+      const dx = (this.car.x - c.x) / (d || 1);
+      const dz = (this.car.z - c.z) / (d || 1);
+      const closing = (cvx - pvx) * dx + (cvz - pvz) * dz;
+      out.push({ id: c.id, right, fwd, closing, speed: c.v });
+    }
+    return out;
+  }
+
   /** Read-only snapshot for the automated tests (window.__fh). */
   snapshot() {
     const c = this.car;
@@ -1062,6 +1176,17 @@ export class Game {
       quality: this.save.quality,
       fps: this.fpsSmoothed,
       errors: [...this.errors],
+      traffic: this.traffic.cars.length,
+      trafficHits: this.trafficHits,
+      rpm: c.rpm,
+      limiter: c.limiter,
+      shifts: c.shifts,
+      audioEngine: this.audio.engineId,
+      audioMode: this.audio.engineMode,
+      audioState: this.audio.ctx?.state ?? "none",
+      audioLevel: this.audio.level(),
+      gearRaw: c.gear,
+      district: this.city.districtOf(c.x, c.z),
       drawCalls: this.renderer.info.render.calls,
       triangles: this.renderer.info.render.triangles,
     };

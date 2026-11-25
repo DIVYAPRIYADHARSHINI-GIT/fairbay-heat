@@ -1,30 +1,37 @@
 import { describe, expect, it } from "vitest";
-import { City } from "../../src/game/city";
+import { World } from "../../src/game/world";
 import { collide } from "../../src/game/collision";
-import { JACK_SPOTS, JACK_RANGE, jackable, nearestSpot, discoveredCount } from "../../src/game/jack";
+import { JACK_SPOTS, JACK_SPOT_DEFS, JACK_RANGE, jackable, nearestSpot, discoveredCount, setJackSpots } from "../../src/game/jack";
 import { CARS, carById, ratings } from "../../src/game/cars";
 import { defaults, parseSave, loadSave, writeSave, SAVE_KEY } from "../../src/game/save";
 import { actionsFor, DEFAULT_BINDINGS, gameCodes } from "../../src/core/input";
 import { mulberry32, wrapAngle } from "../../src/core/math";
 
-const city = new City();
+const city = new World({ jackSpots: JACK_SPOT_DEFS });
+setJackSpots(city.jackSpots);
 
 describe("jack spots", () => {
   it("every car in the catalogue can be found somewhere in the city", () => {
     for (const c of CARS) expect(JACK_SPOTS.some((s) => s.carId === c.id)).toBe(true);
   });
 
-  it("every spot is on a road, clear of buildings and not on a ramp or an intersection", () => {
+  it("every spot is kerbside: just off the carriageway, on solid level ground, clear of obstacles and junctions", () => {
+    expect(JACK_SPOTS.length).toBe(JACK_SPOT_DEFS.length);
     for (const s of JACK_SPOTS) {
-      expect(city.roadAt(s.x, s.z), s.id).not.toBeNull();
+      // Not in a traffic lane...
+      expect(city.net.roadAt(s.x, s.z), s.id).toBeNull();
+      // ...but right next to one.
+      expect(city.net.nearestRoad(s.x, s.z, 14)?.dist ?? 99, s.id).toBeLessThan(city.net.nearestRoad(s.x, s.z, 14)!.road.hw + 6.5);
+      expect(city.isWater(s.x, s.z), s.id).toBe(false);
       for (const c of city.colliders.query(s.x, s.z, 6)) {
         if (c.kind === "circle" && c.breakable) continue;
-        expect(collide(s.x, s.z, 2.6, c), s.id).toBeNull();
+        expect(collide(s.x, s.z, 2.4, c), s.id).toBeNull();
       }
-      expect(city.ground(s.x, s.z), s.id).toBe(0);
-      const nearX = Math.abs(s.x - Math.round(s.x / 120) * 120);
-      const nearZ = Math.abs(s.z - Math.round(s.z / 120) * 120);
-      expect(nearX > 16 || nearZ > 16, s.id).toBe(true);
+      for (const n of city.net.nodes.values()) expect(Math.hypot(s.x - n.x, s.z - n.z), s.id).toBeGreaterThan(n.radius + 4);
+      // Level enough to park on.
+      const fx = Math.sin(s.heading) * 2;
+      const fz = Math.cos(s.heading) * 2;
+      expect(Math.abs(city.ground(s.x + fx, s.z + fz) - city.ground(s.x - fx, s.z - fz)), s.id).toBeLessThan(0.9);
     }
   });
 

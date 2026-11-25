@@ -4,7 +4,7 @@
  */
 
 import { CARS } from "./cars";
-import { GRID, roadWidth } from "./city";
+import type { JackSpotDef } from "./world";
 
 export interface JackSpot {
   id: string;
@@ -18,35 +18,32 @@ export interface JackSpot {
 }
 
 /**
- * A car parked at the kerb of road line `index` ("x" roads run along Z),
- * `along` metres down the road, on the right-hand side of a car travelling in
- * direction `dir` (+1 = towards +Z / +X). Facing the direction of traffic.
+ * Jack spots are kerbside bays on named roads of the hand-made map. The
+ * world computes the exact position (just outside the carriageway) and
+ * reserves the bay so no building, tree or lamp is placed there.
  */
-function kerb(axis: "x" | "z", index: number, along: number, dir: 1 | -1): { x: number; z: number; heading: number } {
-  const off = roadWidth(index) / 2 - 1.6;
-  const coord = index * GRID;
-  // Right-hand side when facing +Z is -X; when facing +X it is +Z.
-  if (axis === "x") return { x: coord - dir * off, z: along, heading: dir > 0 ? 0 : Math.PI };
-  return { x: along, z: coord + dir * off, heading: dir > 0 ? Math.PI / 2 : -Math.PI / 2 };
-}
-
-const spot = (id: string, carId: string, color: number, where: string, k: ReturnType<typeof kerb>): JackSpot => ({ id, carId, color, where, ...k });
-
-/** Placed in kerbside parking along roads, mid-block (verified by unit tests). */
-export const JACK_SPOTS: JackSpot[] = [
-  spot("js-carrara-1", "carrara", 1, "Downtown - Main St", kerb("x", 0, 70, -1)),
-  spot("js-mustanger-1", "mustanger", 0, "Midtown - 2nd Ave", kerb("x", -2, -60, 1)),
-  spot("js-vantis-1", "vantis", 1, "Ridge Park - Lakeside Dr", kerb("z", 4, 300, -1)),
-  spot("js-aventura-1", "aventura", 0, "East Midtown - Harbour Rd", kerb("x", 5, 300, -1)),
-  spot("js-gtarr-1", "gtarr", 1, "Ironworks - Foundry St", kerb("x", 3, -420, 1)),
-  spot("js-veyrone-1", "veyrone", 0, "Port Fairbay - Dock Rd", kerb("z", -5, -420, 1)),
-  spot("js-mustanger-2", "mustanger", 2, "Northshore - Elm St", kerb("x", -5, 540, 1)),
-  spot("js-aventura-2", "aventura", 1, "South Midtown - Canal St", kerb("z", -3, -60, 1)),
-  spot("js-gtarr-2", "gtarr", 2, "West Midtown - Ridge Ave", kerb("x", -3, 180, -1)),
-  spot("js-carrara-2", "carrara", 0, "Northshore - Bay View", kerb("x", 1, 540, 1)),
-  spot("js-vantis-2", "vantis", 3, "Downtown - Market St", kerb("z", -1, -60, -1)),
-  spot("js-veyrone-2", "veyrone", 2, "Northshore - Hill Rd", kerb("z", 5, -300, -1)),
+export const JACK_SPOT_DEFS: JackSpotDef[] = [
+  { id: "js-carrara-1", carId: "carrara", color: 1, road: "lib-1", t: 0.55 },
+  { id: "js-mustanger-1", carId: "mustanger", color: 0, road: "mkt-2", t: 0.5 },
+  { id: "js-vantis-1", carId: "vantis", color: 1, road: "cath", t: 0.45 },
+  { id: "js-aventura-1", carId: "aventura", color: 0, road: "hfront", t: 0.5 },
+  { id: "js-gtarr-1", carId: "gtarr", color: 1, road: "smelt", t: 0.5 },
+  { id: "js-veyrone-1", carId: "veyrone", color: 0, road: "look", t: 0.5 },
+  { id: "js-mustanger-2", carId: "mustanger", color: 2, road: "wa-1", t: 0.5 },
+  { id: "js-aventura-2", carId: "aventura", color: 1, road: "ocean", t: 0.62 },
+  { id: "js-gtarr-2", carId: "gtarr", color: 2, road: "hc-1", t: 0.5 },
+  { id: "js-carrara-2", carId: "carrara", color: 0, road: "canal", t: 0.5 },
+  { id: "js-vantis-2", carId: "vantis", color: 3, road: "cr-CF", t: 0.5 },
+  { id: "js-veyrone-2", carId: "veyrone", color: 2, road: "be-1", t: 0.5 },
 ];
+
+/** Filled in by the game once the world has computed the positions. */
+export const JACK_SPOTS: JackSpot[] = [];
+
+export function setJackSpots(spots: readonly JackSpot[]): void {
+  JACK_SPOTS.length = 0;
+  JACK_SPOTS.push(...spots);
+}
 
 /** How close (m) and how slow (km/h) the player must be to jack a car. */
 export const JACK_RANGE = 7;
