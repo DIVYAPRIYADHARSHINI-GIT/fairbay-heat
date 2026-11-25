@@ -20,7 +20,7 @@ import { CarPhysics, NO_CONTROLS, type Controls } from "./physics";
 import { JACK_SPOTS, JACK_SPOT_DEFS, jackable, setJackSpots, type JackSpot } from "./jack";
 import { DriftScore, JumpTracker, MIN_JUMP } from "./scoring";
 import { defaults, loadSave, writeSave, type Quality, type SaveData } from "./save";
-import type { CircleCollider } from "./collision";
+import { collide, type CircleCollider, type Collider } from "./collision";
 import { buildCar, poseCar, type CarVisual } from "../render/carModel";
 import { buildWorldView, type WorldView } from "../render/worldMesh";
 import { TrafficView } from "../render/trafficView";
@@ -32,6 +32,12 @@ import { Hud, el } from "../ui/hud";
 import { MenuScreen, controlsTable } from "../ui/menus";
 
 export const STEP = 1 / 120;
+
+/** Headlight beam intensity (candela-ish, three.js units) and the most light
+ *  a wall straight ahead may receive from both beams before it would
+ *  white out (bright facades reflect ~half of it, ACES whites start ~1.0). */
+const BEAM = 60;
+const BEAM_ON_WALL = 4.5;
 
 type State = "loading" | "title" | "drive" | "paused" | "garage" | "map" | "help" | "settings";
 
@@ -107,6 +113,9 @@ export class Game {
   private distanceM = 0;
   private stuckTime = 0;
   private lastImpactSound = 0;
+  /** Headlight auto-dim factor (0..1) for walls / cars close ahead. */
+  beamDim = 1;
+  private beamScratch: Collider[] = [];
   trafficHits = 0;
   /** Exposed for tests. */
   readonly trafficModels = TRAFFIC_MODELS;
@@ -160,6 +169,7 @@ export class Game {
     // makes anything a few metres ahead ~100x brighter than the road at
     // 40 m, so we use a gentle decay over a limited range and aim the beams
     // down at the road - surfaces right in front get lit, never blown out.
+    // (A wall straight ahead is also auto-dimmed: see `beamDim`.)
     const mkBeam = () => {
       const l = new THREE.SpotLight(0xfff1dc, 0, 70, 0.42, 0.65, 0.9);
       l.castShadow = false;
@@ -867,7 +877,17 @@ export class Game {
     this.effects.update(this.state === "drive" ? dt : 0, time, this.state === "drive" ? this.car.speed / this.car.vmax : 0, this.camera);
 
     // Headlights follow the car at night (left + right dipped beams).
-    const beamI = night > 0.15 ? night * 60 : 0;
+    // A wall or car straight ahead is lit head-on and reflects ~20x more of
+    // the beam back than the road does at its grazing angle, so it would
+    // white out. Dim the beams as an obstacle closes in - like your eyes
+    // adapting - keeping the light ON the obstacle at a fixed, safe level.
+    // The open road keeps the full beams.
+    if (night > 0.15 && this.state === "drive") {
+      const d = Math.max(2, this.obstacleAhead(45));
+      const onWall = 2 * BEAM * Math.pow(d, -0.9); // both beams, decay 0.9, head-on
+      this.beamDim = damp(this.beamDim, Math.min(1, BEAM_ON_WALL / onWall), 8, dt);
+    } else this.beamDim = 1;
+    const beamI = night > 0.15 ? night * BEAM * this.beamDim : 0;
     const fx = Math.sin(this.renderHeading);
     const fz = Math.cos(this.renderHeading);
     const half = this.car.def.body.width * 0.32;
@@ -1101,6 +1121,52 @@ export class Game {
     if (d === "midtown" || d === "oldtown") return 0.7;
     if (d === "southside" || d === "ironworks" || d === "port") return 0.45;
     return 0.1;
+  }
+
+  /**
+   * Distance (m) from the nose to the first solid thing in the headlight
+   * beams - a building, wall, container or a car - up to `max` (returned when
+   * nothing is in the way). Three rays across the beam, 2 m steps.
+   */
+  obstacleAhead(max: number): number {
+    const car = this.car;
+    const h = this.renderHeading;
+    const fx = Math.sin(h);
+    const fz = Math.cos(h);
+    const nose = car.def.body.length / 2;
+    const ox = this.renderPos.x + fx * nose;
+    const oz = this.renderPos.z + fz * nose;
+    let best = max;
+    for (const a of [-0.17, 0, 0.17]) {
+      const dx = Math.sin(h + a);
+      const dz = Math.cos(h + a);
+      for (let d = 1; d < best; d += 2) {
+        const x = ox + dx * d;
+        const z = oz + dz * d;
+        let hit = false;
+        for (const col of this.city.colliders.query(x, z, 1.5, this.beamScratch)) {
+          if (col.kind === "circle" && (col.broken || col.r < 1)) continue; // posts, trees, hidden cars
+          if (col.top < 1.5) continue; // kerbs, low barriers
+          if (car.y > col.base + col.top || car.y + 2 < col.base) continue; // another level
+          if (collide(x, z, 0.4, col)) {
+            hit = true;
+            break;
+          }
+        }
+        if (hit) {
+          best = d;
+          break;
+        }
+      }
+    }
+    for (const c of this.traffic.cars) {
+      const dx = c.x - ox;
+      const dz = c.z - oz;
+      const ahead = dx * fx + dz * fz - c.model.length / 2;
+      if (ahead <= 0 || ahead >= best || Math.abs(c.y - car.y) > 3) continue;
+      if (Math.abs(-dx * fz + dz * fx) < c.model.width / 2 + 1.2) best = ahead;
+    }
+    return best;
   }
 
   private playerState() {

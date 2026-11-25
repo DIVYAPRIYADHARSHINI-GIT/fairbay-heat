@@ -110,6 +110,33 @@ describe("traffic simulation (headless soak)", () => {
   });
 });
 
+describe("traffic turning pivot", () => {
+  it("through a turn the rear axle stays on the lane path while the nose cuts inside (no pivoting about the middle)", async () => {
+    const tr = new Traffic(world.net, 2, world.ground);
+    tr.target = 0;
+    // A right turn connector at a signalised junction.
+    const conn = world.net.conns.find((c) => c.turn === "right" && c.length > 14 && c.group >= 0)!;
+    const car = tr.add(conn.from!, conn.from!.length - 3);
+    car.route = [conn, conn.to!];
+    car.v = 6;
+    let maxRearOff = 0;
+    let maxCentreOff = 0;
+    const [, rearAxle] = (await import("../../src/game/traffic")).axlesOf(car.model);
+    for (let t = 0; t < 6; t += DT) {
+      tr.step(DT, null, car.x, car.z, null);
+      if (car.seg !== conn) continue;
+      const rx = car.x + Math.sin(car.heading) * rearAxle;
+      const rz = car.z + Math.cos(car.heading) * rearAxle;
+      // Distance to the actual driven path (approach lane + connector + exit).
+      const pathDist = (x: number, z: number) => Math.min(conn.from!.poly.project(x, z).dist, conn.poly.project(x, z).dist, conn.to!.poly.project(x, z).dist);
+      maxRearOff = Math.max(maxRearOff, pathDist(rx, rz));
+      maxCentreOff = Math.max(maxCentreOff, pathDist(car.x, car.z));
+    }
+    expect(maxRearOff).toBeLessThan(0.35);
+    expect(maxCentreOff).toBeGreaterThan(maxRearOff + 0.1);
+  });
+});
+
 describe("traffic vs player", () => {
   it("cars brake for the player's car parked in their lane", () => {
     const tr = new Traffic(world.net, 3, world.ground);

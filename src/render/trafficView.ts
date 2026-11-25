@@ -8,7 +8,7 @@
 
 import * as THREE from "three";
 import { mergeGeometries } from "three/examples/jsm/utils/BufferGeometryUtils.js";
-import { TRAFFIC_MODELS, type TrafficCar, type TrafficKind, type TrafficModel } from "../game/traffic";
+import { TRAFFIC_MODELS, axlesOf, type TrafficCar, type TrafficKind, type TrafficModel } from "../game/traffic";
 
 const MAX_PER_KIND = 48;
 
@@ -114,7 +114,7 @@ function bodyParts(m: TrafficModel): { body: THREE.BufferGeometry; glass: THREE.
   if (k === "bus") dark.push(box(W * 0.9, 0.35, 0.05, 0, H - 0.25, h + 0.01)); // destination board
   // Wheel arches (dark wells so the wheels sit inside the body).
   const wr = k === "bus" ? 0.62 : k === "van" || k === "pickup" || k === "suv" ? 0.5 : 0.44;
-  const axles = k === "bus" ? [h - 2.2, -h + 2.6] : [h - 0.85, -h + 0.85];
+  const axles = axlesOf(m);
   for (const z of axles) {
     for (const sd of [-1, 1]) {
       // A dark half-disc on each body side behind the wheel = wheel well.
@@ -158,7 +158,7 @@ export class TrafficView {
       const r = model.kind === "bus" ? 0.5 : model.kind === "van" || model.kind === "pickup" || model.kind === "suv" ? 0.38 : 0.33;
       const wheelGeo = new THREE.CylinderGeometry(r, r, 0.24, 14);
       wheelGeo.rotateZ(Math.PI / 2);
-      const axles = model.kind === "bus" ? [L / 2 - 2.2, -L / 2 + 2.6] : [L / 2 - 0.85, -L / 2 + 0.85];
+      const axles = axlesOf(model);
       const wheelList: THREE.BufferGeometry[] = [];
       for (const z of axles) for (const s of [-1, 1]) wheelList.push(wheelGeo.clone().translate(s * (W / 2 - 0.09), r, z));
       const wheels = mergeGeometries(wheelList)!;

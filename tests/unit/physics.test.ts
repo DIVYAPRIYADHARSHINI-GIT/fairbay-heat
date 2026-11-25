@@ -136,6 +136,37 @@ describe("steering", () => {
   });
 });
 
+describe("turning pivot", () => {
+  it("in a grip turn the car rotates about its rear axle, not its centre", () => {
+    for (const def of CARS) {
+      const car = new CarPhysics(def);
+      const w = flatWorld();
+      timeTo(car, w, 40);
+      run(car, w, ctl({ throttle: 0.3, steer: 0.7 }), 1.5);
+      expect(car.drifting, def.id).toBe(false);
+      // Rear axle travels along its own heading (no sideways slip there)...
+      expect(Math.abs(car.vLatRear), `${def.id} rear slip`).toBeLessThan(0.15);
+      // ...while the body centre moves into the turn (pivot is behind it).
+      const expected = -car.yawRate * car.lr;
+      expect(Math.abs(car.vLat - expected), def.id).toBeLessThan(0.15);
+      expect(Math.abs(car.vLat), `${def.id} centre swings`).toBeGreaterThan(0.2);
+    }
+  });
+
+  it("turning from rest-ish speed traces a path whose turn centre lies on the rear-axle line", () => {
+    const car = new CarPhysics(carById("gtarr"));
+    const w = flatWorld();
+    timeTo(car, w, 30);
+    run(car, w, ctl({ throttle: 0.2, steer: 1 }), 1);
+    // A rigid body's point with zero sideways velocity lies `vLat / yawRate`
+    // BEHIND the centre (lateral velocity at offset a along the car is
+    // vLat - yawRate * a with our right-positive convention; zero at a = vLat/yaw).
+    // For a car pivoting on its rear axle that point is the rear axle: a = -lr.
+    const a = car.vLat / car.yawRate;
+    expect(Math.abs(a - -car.lr)).toBeLessThan(0.25);
+  });
+});
+
 describe("per-car steering feel", () => {
   /** Time (s) for the steering to reach 90% lock after pressing A at 60 km/h. */
   const windUp = (id: string, sens = 1) => {

@@ -388,7 +388,7 @@ try {
   await onRoad("kings-2", 0.3, 0, true);
   await waitSim(page, 3);
   s = await snap(page);
-  check("traffic populates around the player", s.traffic >= 40, `${s.traffic} cars`);
+  check("traffic populates around the player (48-car budget, 25% lighter than Stage 2)", s.traffic >= 30 && s.traffic <= 48, `${s.traffic} cars`);
   const flow = await page.evaluate(async () => {
     const g = window.__fh;
     const before = new Map(g.traffic.cars.map((c) => [c.id, [c.x, c.z]]));

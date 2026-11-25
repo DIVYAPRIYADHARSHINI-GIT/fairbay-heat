@@ -190,6 +190,7 @@ export class RoadNetwork {
     }
     this.elevations(opts);
     this.gradeSeparate();
+    this.blendRamps();
     this.findBridges(opts);
     this.buildLanes();
     this.buildConnectors();
@@ -386,6 +387,39 @@ export class RoadNetwork {
 
   overpassCount = 0;
 
+  /**
+   * Slip roads (ramps) peel off a highway inside the interchange. Where the
+   * two carriageways still overlap, the ramp must ride on the highway's
+   * surface, then separate at a gentle grade - otherwise the overlap would
+   * be a step. Call after gradeSeparate().
+   */
+  private blendRamps(): void {
+    for (const r of this.roads) {
+      if (r.cls !== "ramp") continue;
+      const c = r.center;
+      const parents = this.roads.filter((o) => o !== r && (o.cls === "freeway" || o.cls === "service" || o.cls === "avenue" || o.cls === "boulevard"));
+      for (let i = 0; i < c.n; i++) {
+        let best: number | null = null;
+        let overlap = 0;
+        for (const o of parents) {
+          const p = o.center.project(c.x[i], c.z[i]);
+          if (p.s <= 0.5 || p.s >= o.length - 0.5) continue;
+          const inside = o.hw + r.hw - p.dist; // > 0 while the carriageways overlap
+          if (inside > overlap) {
+            overlap = inside;
+            best = o.heightAt(p.s);
+          }
+        }
+        if (best !== null) {
+          // Fully on the parent: match it exactly; feathered over the last 4 m of overlap.
+          const k = clamp(overlap / 4, 0, 1);
+          r.elev[i] = r.elev[i] + (best - r.elev[i]) * k;
+        }
+      }
+      limitGrade(r.elev, c.s, 0.08);
+    }
+  }
+
   private findBridges(opts: NetworkOptions): void {
     for (const r of this.roads) {
       let start = -1;
@@ -523,8 +557,16 @@ export class RoadNetwork {
           const uturn = out[0].road === road;
           // Continuing on the same named road (a freeway bend, a ring) is
           // "straight" whatever the angle, so every lane carries on.
-          const sameName = out[0].road!.name === road.name && n.kind !== "roundabout";
-          const turn: Turn = uturn ? "uturn" : sameName || Math.abs(ang) < 0.6 ? "straight" : ang > 0 ? "left" : "right";
+          // Only the MOST nearly straight exit can count as "straight"; a
+          // second exit with the same name (a fork) is a real turn, otherwise
+          // two all-lanes "straight" fans would cross each other's paths.
+          const straightest = targets.reduce((best, o) => {
+            const tb2 = o[0].poly.tangent(0);
+            const a2 = Math.abs(wrapAngle(Math.atan2(tb2.tx, tb2.tz) - Math.atan2(ta.tx, ta.tz)));
+            return a2 < best.a ? { o, a: a2 } : best;
+          }, { o: targets[0], a: Infinity }).o;
+          const sameName = out[0].road!.name === road.name && n.kind !== "roundabout" && out === straightest;
+          const turn: Turn = uturn ? "uturn" : sameName || (Math.abs(ang) < 0.6 && out === straightest) ? "straight" : ang > 0 ? "left" : "right";
           const m = inc.length;
           const kk = out.length;
           const pairs: [number, number][] = [];

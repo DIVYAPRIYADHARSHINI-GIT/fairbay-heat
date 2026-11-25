@@ -8,10 +8,13 @@
  *  - Yaw: a bicycle-model target yaw rate (speed x tan(steer) / wheelbase),
  *    capped by the car's lateral-grip limit, approached at the car's steering
  *    response rate.
- *  - Lateral: world velocity is kept as-is while the body rotates, and the
- *    sideways component is bled off at a grip rate. High grip = it carves,
- *    low grip (handbrake drift) = it slides. Part of the bled-off sideways
- *    speed is handed back to forward speed, so drifting keeps momentum.
+ *  - Lateral: the car turns about its REAR AXLE, like a real car. Gripping
+ *    tyres supply the cornering force that keeps the rear wheels rolling
+ *    along their own heading (up to the car's grip limit), and any leftover
+ *    sideways slip of the rear axle is bled off at a grip rate. High grip =
+ *    it carves, low grip (handbrake drift) = the tail slides. Part of the
+ *    bled-off sideways speed is handed back to forward speed, so drifting
+ *    keeps momentum.
  *  - Vertical: follows the ground height (ramps), leaves the ground when the
  *    surface drops away faster than it can follow, and flies ballistically.
  *  - Collisions: three circles along the body against the static world.
@@ -103,6 +106,9 @@ export class CarPhysics {
   readonly vmax: number;
   readonly engineAccel: number;
   readonly wheelbase: number;
+  /** Distance from the body centre back to the rear axle (m). The car turns
+   *  about a point on the rear-axle line, like a real car - not its middle. */
+  readonly lr: number;
   readonly radius: number;
   readonly circleOffsets: number[];
 
@@ -111,6 +117,7 @@ export class CarPhysics {
   constructor(readonly def: CarDef) {
     const b = def.body;
     this.wheelbase = (b.frontAxle - b.rearAxle) * b.length;
+    this.lr = -b.rearAxle * b.length;
     this.radius = (b.width / 2) * 0.96;
     const end = b.length / 2 - this.radius * 0.85;
     this.circleOffsets = [end, 0, -end];
@@ -139,10 +146,14 @@ export class CarPhysics {
   get speedKmh(): number {
     return this.speed * KMH;
   }
-  /** Angle between where the car points and where it travels, rad. */
+  /** Sideways speed of the rear axle (m/s, + right). Zero in a clean grip turn. */
+  get vLatRear(): number {
+    return this.vLat + this.yawRate * this.lr;
+  }
+  /** Angle between where the rear wheels point and where they travel (rad). */
   get slipAngle(): number {
     if (this.speed < 2) return 0;
-    return Math.atan2(this.vLat, Math.abs(this.vLong));
+    return Math.atan2(this.vLatRear, Math.abs(this.vLong));
   }
 
   place(x: number, z: number, heading: number, y = 0): void {
@@ -229,7 +240,8 @@ export class CarPhysics {
       this.accelLong = (vLong - before) / dt;
 
       // ---- drift state ---------------------------------------------------
-      const slip = speed > 2 ? Math.atan2(vLat, Math.abs(vLong)) : 0;
+      // Slip is measured at the rear axle (a clean grip turn has none there).
+      const slip = speed > 2 ? Math.atan2(vLat + this.yawRate * this.lr, Math.abs(vLong)) : 0;
       if (!this.drifting) {
         const kick = c.handbrake && speed > 11 && Math.abs(this.steer) > 0.15;
         // Loose-rear cars break traction under power more readily.
@@ -268,14 +280,45 @@ export class CarPhysics {
       // cornering overwhelms the rear tyres and lets the tail step out.
       if (!this.drifting && h.drive === "RWD" && c.throttle >= 1) {
         const cornerLoad = Math.abs(this.yawRate * vLong) / h.cornering;
-        grip *= 1 - feel.rear * 0.75 * clamp((cornerLoad - 0.6) * 2.5, 0, 1);
+        grip *= 1 - feel.rear * 0.85 * clamp((cornerLoad - 0.55) * 3, 0, 1);
       }
       if (c.handbrake) grip = Math.min(grip, h.driftGrip * 0.8);
       if (offroad) grip *= 0.6;
       const total = Math.hypot(vLong, vLat);
-      const newLat = vLat * Math.exp(-grip * dt);
-      const lost = Math.abs(vLat - newLat);
-      vLat = newLat;
+      // Evaluate grip in the frame the body will have AFTER this step's
+      // rotation: rotating the car must not itself count as sideways slip.
+      const turn = this.yawRate * dt;
+      const nh = this.heading + turn;
+      const nfx = Math.sin(nh);
+      const nfz = Math.cos(nh);
+      const wx = fx * vLong + rx * vLat;
+      const wz = fz * vLong + rz * vLat;
+      vLong = wx * nfx + wz * nfz;
+      vLat = wx * -nfz + wz * nfx;
+      fx = nfx;
+      fz = nfz;
+      rx = -nfz;
+      rz = nfx;
+      // Tyre grip removes sideways slip AT THE REAR AXLE: in a clean turn the
+      // rear wheels roll straight along their heading and the body swings
+      // about the rear-axle line, instead of pivoting about its middle.
+      const latTarget = -this.yawRate * this.lr;
+      const rel0 = vLat - latTarget;
+      // 1) Cornering force: gripping tyres supply the centripetal push that
+      //    keeps the rear axle on its arc (v * yawRate), up to what the
+      //    tyres can hold. Without it the car would always slide wide by
+      //    v*yaw/grip and look like it pivots about its middle.
+      const needed = vLong * this.yawRate * dt;
+      // Power oversteer / handbrake / off-road all reduce `grip`, and with it
+      // how much cornering force the rear tyres can supply.
+      const holdLimit = (grip / h.grip) * h.cornering * 1.25 * dt;
+      const held = clamp(needed, -holdLimit, holdLimit);
+      let rel = rel0 - held * (this.drifting ? 0.15 : 1);
+      // 2) Remaining slip decays at the grip rate.
+      const newRel = rel * Math.exp(-grip * dt);
+      const lost = Math.abs(rel - newRel);
+      rel = newRel;
+      vLat = latTarget + rel;
       // Hand part of the scrubbed sideways speed back to forward speed (keeps
       // momentum through drifts) without ever gaining total speed.
       if (Math.abs(vLong) > 1) {

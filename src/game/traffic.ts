@@ -57,6 +57,18 @@ export function idmAccel(v: number, v0: number, s: number, dv: number, p = IDM):
 
 // ---- Traffic car models ------------------------------------------------------
 
+/** Axle positions along a traffic model, measured from its centre (+ = front). */
+export function axlesOf(m: { kind: string; length: number }): [number, number] {
+  const h = m.length / 2;
+  return m.kind === "bus" ? [h - 2.2, -h + 2.6] : [h - 0.85, -h + 0.85];
+}
+
+/** Axle-to-axle distance for a traffic model (m). */
+export function wheelbaseOf(m: { kind: string; length: number }): number {
+  const [f, r] = axlesOf(m);
+  return f - r;
+}
+
 export type TrafficKind = "sedan" | "hatch" | "suv" | "taxi" | "van" | "pickup" | "bus";
 
 export interface TrafficModel {
@@ -107,6 +119,8 @@ export interface TrafficCar {
   wyaw: number;
   /** Collider the player physics sees. */
   colliders: CircleCollider[];
+  /** The segment the car was on before this one (for rear-axle tracking). */
+  prevSeg: LaneSeg | null;
   /** Waiting time at a junction (s), to break deadlocks. */
   waited: number;
   /** Horn cool-down. */
@@ -137,7 +151,7 @@ const DESPAWN = 380;
 
 export class Traffic {
   readonly cars: TrafficCar[] = [];
-  target = 64;
+  target = 48;
   time = 0;
   private nextId = 1;
   private rng: () => number;
@@ -223,6 +237,7 @@ export class Traffic {
       wvz: 0,
       wyaw: 0,
       colliders: [],
+      prevSeg: null,
       waited: 0,
       hornT: 0,
       alive: true,
@@ -550,6 +565,7 @@ export class Traffic {
             break;
           }
           this.unindex(car);
+          car.prevSeg = car.seg;
           car.seg = next;
           car.s = 0;
           this.index(car);
@@ -566,13 +582,26 @@ export class Traffic {
     return ev;
   }
 
+  /**
+   * Positions the car like a real one: the REAR AXLE runs along the lane
+   * path, and the body points at the path a wheelbase ahead (where the front
+   * axle is). In a turn the body therefore swings around its rear wheels,
+   * with the nose cutting inside - instead of pivoting about its middle.
+   */
   private place(car: TrafficCar): void {
     if (car.wrecked > 0) return;
-    const p = car.seg.poly.sample(car.s);
-    const t = car.seg.poly.tangent(car.s);
-    car.x = p.x;
-    car.z = p.z;
-    car.heading = Math.atan2(t.tx, t.tz);
+    const wb = wheelbaseOf(car.model);
+    const rearOff = -axlesOf(car.model)[1]; // centre -> rear axle distance
+    // car.s is the CENTRE's progress; the rear axle is `rearOff` behind it.
+    const rear = this.pathPoint(car, car.s - rearOff);
+    const front = this.pathPoint(car, car.s - rearOff + wb);
+    const hx = front.x - rear.x;
+    const hz = front.z - rear.z;
+    const len = Math.hypot(hx, hz) || 1;
+    car.heading = Math.atan2(hx, hz);
+    car.x = rear.x + (hx / len) * rearOff;
+    car.z = rear.z + (hz / len) * rearOff;
+    const p = { x: car.x, z: car.z };
     // Height from the car's own road (so cars under a viaduct stay under it).
     const seg = car.seg;
     if (seg.road) car.y = seg.road.heightAt(seg.road.center.project(p.x, p.z).s);
@@ -584,6 +613,41 @@ export class Traffic {
       const hb = b.heightAt(car.seg.to!.dir > 0 ? b.s0 : b.s1);
       car.y = this.ground(p.x, p.z, ha + (hb - ha) * f);
     }
+  }
+
+  /**
+   * A point on the car's path at arc length `s` relative to its current
+   * segment: negative values reach back into the previous segment (kept in
+   * `prevSeg`), values past the end reach into the planned route.
+   */
+  private pathPoint(car: TrafficCar, s: number): { x: number; z: number } {
+    let seg = car.seg;
+    if (s < 0 && car.prevSeg) {
+      seg = car.prevSeg;
+      s += seg.length;
+      if (s < 0) s = 0;
+      const p = seg.poly.sample(s);
+      return { x: p.x, z: p.z };
+    }
+    if (s < 0) {
+      // No history yet: extrapolate backwards along the start tangent.
+      const p = seg.poly.sample(0);
+      const t = seg.poly.tangent(0);
+      return { x: p.x + t.tx * s, z: p.z + t.tz * s };
+    }
+    let i = 0;
+    while (s > seg.length && i < car.route.length) {
+      s -= seg.length;
+      seg = car.route[i++];
+    }
+    if (s > seg.length) {
+      const p = seg.poly.sample(seg.length);
+      const t = seg.poly.tangent(seg.length);
+      const over = s - seg.length;
+      return { x: p.x + t.tx * over, z: p.z + t.tz * over };
+    }
+    const p = seg.poly.sample(s);
+    return { x: p.x, z: p.z };
   }
 
   private stepWreck(car: TrafficCar, dt: number): void {

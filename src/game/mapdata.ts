@@ -44,17 +44,17 @@ export interface RoadClassSpec {
 }
 
 export const ROAD_CLASSES: Record<RoadClass, RoadClassSpec> = {
-  freeway: { lanes: 3, laneWidth: 3.6, median: 3, shoulder: 2.2, speed: 30, oneWay: false, sidewalk: false, barriers: true, rails: false, lamps: "median" },
-  boulevard: { lanes: 2, laneWidth: 3.5, median: 2.2, shoulder: 0.6, speed: 17, oneWay: false, sidewalk: true, barriers: false, rails: false, lamps: "both" },
-  avenue: { lanes: 2, laneWidth: 3.4, median: 0.5, shoulder: 0.8, speed: 15, oneWay: false, sidewalk: true, barriers: false, rails: false, lamps: "both" },
-  street: { lanes: 1, laneWidth: 3.6, median: 0.3, shoulder: 1.6, speed: 12.5, oneWay: false, sidewalk: true, barriers: false, rails: false, lamps: "both" },
-  mountain: { lanes: 1, laneWidth: 3.7, median: 0.3, shoulder: 0.9, speed: 14, oneWay: false, sidewalk: false, barriers: false, rails: true, lamps: "none" },
-  coast: { lanes: 1, laneWidth: 3.8, median: 0.4, shoulder: 2.2, speed: 19, oneWay: false, sidewalk: false, barriers: false, rails: false, lamps: "one" },
-  ring: { lanes: 1, laneWidth: 6.5, median: 0, shoulder: 1.4, speed: 9, oneWay: true, sidewalk: true, barriers: false, rails: false, lamps: "none" },
+  freeway: { lanes: 3, laneWidth: 4.1, median: 3, shoulder: 2.8, speed: 30, oneWay: false, sidewalk: false, barriers: true, rails: false, lamps: "median" },
+  boulevard: { lanes: 2, laneWidth: 4.0, median: 2.2, shoulder: 1.0, speed: 17, oneWay: false, sidewalk: true, barriers: false, rails: false, lamps: "both" },
+  avenue: { lanes: 2, laneWidth: 3.95, median: 0.5, shoulder: 1.1, speed: 15, oneWay: false, sidewalk: true, barriers: false, rails: false, lamps: "both" },
+  street: { lanes: 1, laneWidth: 4.2, median: 0.3, shoulder: 1.8, speed: 12.5, oneWay: false, sidewalk: true, barriers: false, rails: false, lamps: "both" },
+  mountain: { lanes: 1, laneWidth: 4.2, median: 0.3, shoulder: 1.2, speed: 14, oneWay: false, sidewalk: false, barriers: false, rails: true, lamps: "none" },
+  coast: { lanes: 1, laneWidth: 4.3, median: 0.4, shoulder: 2.6, speed: 19, oneWay: false, sidewalk: false, barriers: false, rails: false, lamps: "one" },
+  ring: { lanes: 1, laneWidth: 7.6, median: 0, shoulder: 1.6, speed: 9, oneWay: true, sidewalk: true, barriers: false, rails: false, lamps: "none" },
   /** One-way freeway on/off ramp (slip road). */
-  ramp: { lanes: 1, laneWidth: 4.0, median: 0, shoulder: 1.8, speed: 17, oneWay: true, sidewalk: false, barriers: false, rails: true, lamps: "one" },
+  ramp: { lanes: 1, laneWidth: 4.6, median: 0, shoulder: 2.2, speed: 17, oneWay: true, sidewalk: false, barriers: false, rails: true, lamps: "one" },
   /** One-way frontage / service road running alongside a highway. */
-  service: { lanes: 2, laneWidth: 3.4, median: 0, shoulder: 1.0, speed: 13, oneWay: true, sidewalk: true, barriers: false, rails: false, lamps: "one" },
+  service: { lanes: 2, laneWidth: 4.0, median: 0, shoulder: 1.2, speed: 13, oneWay: true, sidewalk: true, barriers: false, rails: false, lamps: "one" },
   /** Airfield runway: a 46 m wide, dead-flat straight - the top-speed strip. */
   runway: { lanes: 1, laneWidth: 18, median: 4, shoulder: 3, speed: 14, oneWay: false, sidewalk: false, barriers: false, rails: false, lamps: "none" },
 };
@@ -101,9 +101,9 @@ const R = (id: string, name: string, cls: RoadClass, from: string, to: string, v
 
 /** Interstate 9 through Midtown runs on a straight viaduct line. */
 const I9 = (e: number): [number, number] => [e, -40 - 0.0787 * (e + 470)];
-/** Frontage roads run 28 m either side of the I-9 viaduct. */
-const FN = (e: number): [number, number] => [e, I9(e)[1] + 28];
-const FS = (e: number): [number, number] => [e, I9(e)[1] - 28];
+/** Frontage roads run 31 m either side of the I-9 viaduct (clear of its deck). */
+const FN = (e: number): [number, number] => [e, I9(e)[1] + 31];
+const FS = (e: number): [number, number] => [e, I9(e)[1] - 31];
 const NE = (id: string, p: [number, number], kind: JunctionKind, label?: string) => N(id, p[0], p[1], kind, label);
 
 // ---------------------------------------------------------------------------

@@ -162,8 +162,11 @@ describe("hand-made map", () => {
       for (let s = 0; s <= seg.length; s += 1) {
         const p = seg.poly.sample(s);
         // Ask with the previous height, as a car driving along does (starting
-        // from the lane's own road surface, not whatever deck is overhead).
-        const start = seg.road ? seg.road.heightAt(seg.road.center.project(p.x, p.z).s) : seg.node!.elev;
+        // from the surface it arrives on, not whatever deck is overhead).
+        const from = seg.from?.road;
+        const start = seg.road
+          ? seg.road.heightAt(seg.road.center.project(p.x, p.z).s)
+          : world.ground(p.x, p.z, from!.heightAt(seg.from!.dir > 0 ? from!.s1 : from!.s0));
         const g = world.ground(p.x, p.z, Number.isNaN(prev) ? start : prev);
         if (!Number.isNaN(prev)) expect(Math.abs(g - prev), `${seg.kind} ${seg.road?.id ?? seg.node?.id} @ ${s}`).toBeLessThan(0.25);
         prev = g;

@@ -75,16 +75,18 @@ spirit of GTA / NFS Most Wanted: 143 named roads and 83 junctions,
 - **Old Town** has winding streets around a small roundabout square, plus **Central Park**. Further out are the **Hillcrest** suburbs and **Ridge Parkway** along the northern hills.
 - The **Fairbay Airfield** has a 460 m runway (a top-speed strip) with a jump at the end. **Ironworks** has tank farms, **Port Fairbay** has containers and cranes, and the **Coast Highway** runs along **Sunset Beach**.
 - The **Calder Pass** hairpins climb over Mount Calder (150 m) and down to **Westside** across the river.
+- Lanes are **4.0-4.2 m wide** (freeway 4.1 m with 2.8 m shoulders, the roundabout ring 7.6 m), about 15% wider than real-world minimums, so there is room to weave through traffic at speed.
 
 ## Stage 2: traffic
 
-~64 vehicles (sedans, hatchbacks, SUVs, taxis, vans, pickups, buses) drive
+Up to 48 vehicles (sedans, hatchbacks, SUVs, taxis, vans, pickups, buses) drive
 around the player on the lane graph (`src/game/traffic.ts`):
 
 - **Car following** uses the Intelligent Driver Model (the standard model in traffic research): safe time gap, smooth acceleration, harder braking when close.
 - They **stop at red lights** (2-phase signals at 24 junctions), **give way** at priority junctions and when entering the roundabout, slow for curves, use **indicators**, and show **brake lights**.
 - A junction reservation system stops them driving through each other; left-turners clear on yellow; a deadlock breaker creeps through after a long wait.
 - They brake for you if you stop in their lane, **honk**, and get **knocked away** with hazard lights when you ram them.
+- Like real cars they **turn about their rear axle**: the rear wheels follow the lane while the nose swings into the turn (no spinning about the middle).
 
 ## Sound
 
@@ -106,7 +108,7 @@ plain TypeScript in this repo:
 
 | Module | What it does |
 | --- | --- |
-| `src/game/physics.ts` | Arcade car physics: engine curve auto-calibrated to each car's 0–100 / top speed, braking/reverse, bicycle-model steering with a grip limit, handbrake + power-over drifts, nitro, ramps/jumps, wall collisions with wall-riding. Fixed 120 Hz timestep. |
+| `src/game/physics.ts` | Arcade car physics: engine curve auto-calibrated to each car's 0–100 / top speed, braking/reverse, bicycle-model steering with a grip limit, the car turns about its rear axle (tyre cornering force keeps the rear wheels rolling along their heading), handbrake + power-over drifts, nitro, ramps/jumps, wall collisions with wall-riding. Fixed 120 Hz timestep. |
 | `src/game/collision.ts` | Circle-vs-box / circle-vs-circle tests with a spatial hash |
 | `src/game/mapdata.ts`, `roads.ts`, `world.ts` | The hand-made map, road network (curves, junctions, elevation, bridges, lane graph, signals) and the world (terrain, water, buildings along curved roads, props, ground/surface queries) |
 | `src/game/traffic.ts` | Traffic AI (IDM car-following, signals, give-way, junction reservation, collisions) |
@@ -126,13 +128,13 @@ The whole game is a 0.7 MB static site (185 KB gzipped) with no assets to downlo
 npm test     # typecheck + unit + e2e
 ```
 
-- **81 unit tests** (Vitest) covering:
-  - **Physics:** 0-100 km/h and top speed for each car, braking, steering, drifting, timestep independence, walls, jumps.
+- **91 unit tests** (Vitest) covering:
+  - **Physics:** 0-100 km/h and top speed for each car, braking, steering (per-car feel, and the car turning about its rear axle - the instantaneous turn centre is measured on the rear-axle line), drifting, timestep independence, walls, jumps.
   - **Map:** every lane reachable both ways, grades within 10% (15% on the pass), no step in the surface anywhere along any lane, no building on a road or in water or overlapping another, lanes clear of obstacles, bridges over the river, signal phases never both green.
-  - **Traffic:** IDM behaviour, plus a 5-minute headless soak with 110 cars: **zero** cars passing through each other, **zero** red-light runs, no gridlock. Also braking for the player, ramming and determinism.
-  - **Engine sound**, rendered offline and analysed: the firing frequency is the dominant tone, pitch follows rpm, the V8 has 3x more burble than the V12/W16, full throttle is louder than overrun, the rev limiter chops the sound, the turbo spools and blows off, crackles on lift-off, and different cars sound different.
+  - **Traffic:** IDM behaviour, plus a 5-minute headless soak with 110 cars: **zero** cars passing through each other, **zero** red-light runs, no gridlock. Rear axles stay on the lane path through turns. Also braking for the player, ramming and determinism.
+  - **Engine sound**, rendered offline and analysed: the firing frequency is the dominant tone, pitch follows rpm, the V8 has 3x more burble than the V12/W16, full throttle is louder than overrun, the rev limiter chops the sound, the turbo spools up, gear changes make no hiss, crackles on lift-off, and different cars sound different.
   - Save files, jack spots and scoring.
-- **82 end-to-end checks** (`tests/e2e.mjs`) run the real build in Chrome with **real key presses**. They cover menus, driving, braking and reversing, drift, nitro, crashing into a building, a ramp jump and jacking a car. They check that the engine runs on the audio thread, that the engine model matches the car, that throttle is louder than idle, that the revs drop on each upshift and that M mutes. For traffic they check it populates and moves, includes several vehicle types, stays on the roads, and that ramming a car knocks it out. They also drive up the mountain, cross the bridge, test the camera/map/pause/time/garage keys, persistence across reload and night mode, require 60 fps, and fail on any console error.
+- **87 end-to-end checks** (`tests/e2e.mjs`) run the real build in Chrome with **real key presses**. They cover menus, driving, braking and reversing, drift, nitro, crashing into a building, a ramp jump and jacking a car. They check that the engine runs on the audio thread, that the engine model matches the car, that throttle is louder than idle, that the revs drop on each upshift and that M mutes. For traffic they check it populates and moves, includes several vehicle types, stays on the roads, and that ramming a car knocks it out. They also drive up the mountain, cross the bridge, drive the viaduct and the frontage road under it, test the camera/map/pause/time/garage keys, the steering-sensitivity setting, persistence across reload and night mode (headlights must not white out the view behind a car or facing a wall), require the display's full frame rate, and fail on any console error.
 
 Measured: **60 fps at 1440 x 900** with traffic (Apple M1, Chrome, High quality).
 
