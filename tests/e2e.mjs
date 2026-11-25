@@ -133,7 +133,8 @@ try {
   check("ArrowDown brakes", (await snap(page)).speedKmh < 5);
 
   section("Handbrake drift and nitro");
-  await onRoad("i9-2", 0.22, 1);
+  // The 46 m wide airfield runway: nothing to clip mid-drift.
+  await onRoad("runway", 0.08, 0);
   await holdSim(page, ["KeyW"], 3.5);
   await page.evaluate(() => (window.__fh.car.nitro = 0.3));
   await holdSim(page, ["KeyW", "KeyA", "Space"], 0.4);
@@ -144,7 +145,7 @@ try {
   s = await snap(page);
   check("drifting refills nitro", s.nitro > 0.3, s.nitro.toFixed(3));
   const drift = await page.$eval(".drift", (e) => ({ show: e.classList.contains("show"), text: e.textContent }));
-  check("the drift counter shows on screen", drift.show && /DRIFT [0-9]/.test(drift.text), drift.text);
+  check("the drift counter shows on screen", drift.show && /DRIFT [0-9]/.test(drift.text) && parseInt(drift.text.replace(/\D/g, ""), 10) >= 50, drift.text);
   await brakeToStop(page);
   await onRoad("i9-2", 0.22, 1);
   await page.evaluate(() => (window.__fh.car.nitro = 1));
