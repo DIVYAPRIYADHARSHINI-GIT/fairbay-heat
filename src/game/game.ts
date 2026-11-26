@@ -15,7 +15,7 @@ import { Input, REBINDABLE, RESERVED_CODES, applyBindings, keyName, type Action 
 import { clamp, damp, lerp, wrapAngle } from "../core/math";
 import { CARS, carById, ratings, type CarDef } from "./cars";
 import { World, DISTRICT_NAMES, type District } from "./world";
-import { Traffic, TRAFFIC_MODELS, POLICE_MODEL, type TrafficEvents } from "./traffic";
+import { Traffic, TRAFFIC_MODELS, POLICE_MODEL, LEVEL_GAP, type TrafficEvents } from "./traffic";
 import { Police, POLICE_CARS, type PlayerView } from "./police";
 import { HeatSystem, type HeatEvent, type Offence } from "./heat";
 import { CarPhysics, NO_CONTROLS, type Controls } from "./physics";
@@ -24,6 +24,7 @@ import { DriftScore, JumpTracker, MIN_JUMP, NearMiss } from "./scoring";
 import { RACES, Race, SpeedEvents, raceStart, type RaceDef } from "./race";
 import { defaults, loadSave, writeSave, type Quality, type SaveData } from "./save";
 import { collide, type CircleCollider, type Collider } from "./collision";
+import { crashKick, slideOff } from "./contact";
 import { buildCar, mergeCarBody, poseCar, type CarVisual } from "../render/carModel";
 import { buildWorldView, type WorldView } from "../render/worldMesh";
 import { TrafficView } from "../render/trafficView";
@@ -43,7 +44,7 @@ export const STEP = 1 / 120;
  *  a wall straight ahead may receive from both beams before it would
  *  white out (bright facades reflect ~half of it, ACES whites start ~1.0). */
 const BEAM = 60;
-const BEAM_ON_WALL = 4.5;
+const BEAM_ON_WALL = 3.2;
 
 type State = "loading" | "title" | "drive" | "paused" | "garage" | "map" | "help" | "settings" | "keys";
 
@@ -153,9 +154,13 @@ export class Game {
   constructor(private container: HTMLElement) {
     this.save = loadSave();
     const q = QUALITY[this.save.quality];
-    this.renderer = new THREE.WebGLRenderer({ antialias: q.aa, powerPreference: "high-performance", stencil: false });
+    const dpr = Math.min(window.devicePixelRatio || 1, q.pixelRatio);
+    // Multisampling is redundant at 2x pixel density (each pixel is already
+    // a quarter of the size) and the night bloom pass bypasses it anyway -
+    // but its buffers cost ~150 MB of GPU memory on a 2880x1800 screen.
+    this.renderer = new THREE.WebGLRenderer({ antialias: q.aa && dpr < 1.5, powerPreference: "high-performance", stencil: false });
     this.renderer.info.autoReset = false;
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, q.pixelRatio));
+    this.renderer.setPixelRatio(dpr);
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
     this.renderer.shadowMap.enabled = true;
@@ -163,6 +168,14 @@ export class Game {
     this.renderer.domElement.className = "game-canvas";
     this.renderer.domElement.setAttribute("aria-label", "Fairbay Heat - 3D driving game");
     container.appendChild(this.renderer.domElement);
+    // To save memory the city's geometry and textures live only on the GPU
+    // once uploaded (their CPU copies are freed). If the browser resets the
+    // GPU (a "context loss"), they cannot be re-sent - so save and reload.
+    this.renderer.domElement.addEventListener("webglcontextlost", (e) => {
+      e.preventDefault();
+      this.persist();
+    });
+    this.renderer.domElement.addEventListener("webglcontextrestored", () => location.reload());
     this.city = new World({ jackSpots: JACK_SPOT_DEFS });
     setJackSpots(this.city.jackSpots);
     this.traffic = new Traffic(this.city.net, 77, this.city.ground);
@@ -562,7 +575,7 @@ export class Game {
       el(
         "p",
         "sub",
-        "Drift (Space + steer) or pass traffic closely at speed (NEAR MISS) to fill your nitro. Find parked cars around Fairbay (orange dots on the map) and press E next to one to take it. Races: drive into an orange beacon and press E. Speed cameras and traps are on the map (Tab). Remap any key in Settings > Controls. Police: speeding past a patrol (over 95 km/h in town, 140 on highways), hitting cars or smashing lamp posts in sight of a cop starts a chase. Break line of sight and stay hidden until the cooldown bar fills to escape; stop with a cop alongside and you are busted. Heat 3+ brings roadblocks - look for the gap at the kerb. Police can be switched off in Settings.",
+        "Drift (Space + steer) or pass traffic closely at speed (NEAR MISS) to fill your nitro. Find parked cars around Fairbay (orange dots on the map) and press E next to one to take it. Races: drive into an orange beacon and press E. Speed cameras and traps are on the map (Tab). Remap any key in Settings > Controls. Police: speeding past a patrol (over 95 km/h in town, 140 on highways), hitting cars or smashing lamp posts in sight of a cop starts a chase. Break line of sight and stay hidden until the cooldown bar fills to escape; stop with a cop alongside and you are busted. Heat 4+ brings roadblocks - look for the gap at the kerb. Police can be switched off in Settings.",
       ),
     );
     const hf = el("div", "menu-foot");
@@ -1084,7 +1097,8 @@ export class Game {
     this.cityView.update(time, this.traffic.time);
     // Weather: rain follows in-game time; roads get wet; the car feels it.
     const gameHours = this.state === "drive" && this.env.speed > 0 ? dt / this.env.speed : 0;
-    this.weather.update(this.state === "drive" || this.state === "title" ? dt : 0, gameHours, this.camera, new THREE.Vector3(this.car.vx, 0, this.car.vz), time, (x, z) => this.city.ground(x, z, this.car.y));
+    this.deckAbove = this.state === "drive" ? this.deckOver(this.car.x, this.car.z, this.car.y) : Infinity;
+    this.weather.update(this.state === "drive" || this.state === "title" ? dt : 0, gameHours, this.camera, new THREE.Vector3(this.car.vx, 0, this.car.vz), time, (x, z) => this.city.ground(x, z, this.car.y), this.deckAbove);
     this.env.clouds = 0.35 + this.weather.rain * 0.6;
     this.cityView.setWet(this.weather.wetness);
     this.car.wet = this.weather.wetness;
@@ -1095,7 +1109,7 @@ export class Game {
       // The bright daytime sky sits near 1.0 after tone mapping, so a day
       // bloom smears it over everything. Bloom is a night effect (lamps,
       // windows, tail lights): off by day, fading in at dusk.
-      this.bloom.strength = lerp(0, 0.4, night);
+      this.bloom.strength = lerp(0, 0.32, night);
       this.bloom.threshold = 1.1;
       this.bloom.radius = 0.35;
     }
@@ -1164,7 +1178,8 @@ export class Game {
       paused: this.state !== "drive",
       camera: this.rig.mode,
       rubbing: this.rubTime > 0,
-      rain: this.weather.rain,
+      // Under a deck the rain is a distant hiss, not drops on the roof.
+      rain: this.weather.rain * (Number.isFinite(this.deckAbove) ? 0.35 : 1),
       wet: this.weather.wetness,
       nitro: this.car.nitroActive && this.state === "drive",
     });
@@ -1177,13 +1192,25 @@ export class Game {
       this.audio.updateSirens([]);
     }
 
-    if (this.bloom.enabled && this.bloom.strength > 0.01) this.composer.render(dt);
-    else this.renderer.render(this.scene, this.camera);
+    if (this.bloom.enabled && this.bloom.strength > 0.01) {
+      this.composer.render(dt);
+      this.bloomIdle = 0;
+      this.bloomBuffers = true;
+    } else {
+      this.renderer.render(this.scene, this.camera);
+      // By day the bloom chain's screen-sized buffers (~30 MB, ~120 MB on a
+      // Retina screen) sit unused: free them after a while; they are
+      // re-created at dusk.
+      this.bloomIdle += dt;
+      if (this.bloomBuffers && this.bloomIdle > 8) this.freeBloomBuffers();
+    }
     this.input.endFrame();
   }
 
   private handleStepEvents(ev: ReturnType<CarPhysics["step"]>, c: Controls): void {
-    if (ev.impact > 3) {
+    // Scraping along a wall (no real hit): the rub sound only.
+    if (ev.impact > 0 && ev.impact <= 4) this.rubTime = 0.15;
+    if (ev.impact > 4) {
       const s = clamp(ev.impact / 25, 0, 1);
       if (this.simTime - this.lastImpactSound > 0.15) {
         this.audio.impact(s);
@@ -1348,6 +1375,19 @@ export class Game {
     }
   }
 
+  private bloomIdle = 0;
+  private bloomBuffers = false;
+
+  /** Frees the GPU memory of the post-processing render targets (kept: shaders). */
+  private freeBloomBuffers(): void {
+    this.composer.renderTarget1.dispose();
+    this.composer.renderTarget2.dispose();
+    const b = this.bloom as unknown as { renderTargetBright: THREE.WebGLRenderTarget; renderTargetsHorizontal: THREE.WebGLRenderTarget[]; renderTargetsVertical: THREE.WebGLRenderTarget[] };
+    b.renderTargetBright.dispose();
+    for (const t of [...b.renderTargetsHorizontal, ...b.renderTargetsVertical]) t.dispose();
+    this.bloomBuffers = false;
+  }
+
   private resize(): void {
     const w = this.container.clientWidth || window.innerWidth;
     const h = this.container.clientHeight || window.innerHeight;
@@ -1358,6 +1398,19 @@ export class Game {
     this.effects?.setViewport(h * this.renderer.getPixelRatio(), this.camera.fov);
     if (this.state === "map") this.drawMap();
   }
+
+  /** Height of the underside of a road deck right above (x, z, y), or Infinity in the open. */
+  private deckOver(x: number, z: number, y: number): number {
+    let best = Infinity;
+    for (const o of this.city.net.roadsAt(x, z)) {
+      const h = o.road.heightAt(o.s);
+      if (h > y + 3 && o.road.isBridge(o.s)) best = Math.min(best, h - 1.4);
+    }
+    return best;
+  }
+
+  /** Underside height of the deck over the player (Infinity = open sky). */
+  private deckAbove = Infinity;
 
   /** How built-up the surroundings are (0 open country .. 1 city canyon), for reverb. */
   private enclosure(): number {
@@ -1735,8 +1788,9 @@ export class Game {
   }
 
   private stepNearMiss(dt: number): void {
-    const cars = this.traffic.cars.map((c) => ({ id: c.id, x: c.x, z: c.z, heading: c.heading, v: c.v, length: c.model.length, width: c.model.width }));
     const car = this.car;
+    // Only cars on the player's level (not the street under a viaduct).
+    const cars = this.traffic.cars.filter((c) => Math.abs(c.y - car.y) < LEVEL_GAP).map((c) => ({ id: c.id, x: c.x, z: c.z, heading: c.heading, v: c.v, length: c.model.length, width: c.model.width }));
     for (const nm of this.nearMiss.update(dt, car.x, car.z, car.heading, car.speed, car.def.body.length, car.def.body.width, cars)) {
       car.nitro = Math.min(1, car.nitro + nm.nitro);
       this.hud.popup(nm.chain > 1 ? `NEAR MISS x${nm.chain}` : "NEAR MISS", `+${Math.round(nm.nitro * 100)}% nitro`, "nitro");
@@ -1748,6 +1802,8 @@ export class Game {
   nearMisses = 0;
   /** Times the player brushed past traffic (tests). */
   rubs = 0;
+  /** Firm taps on traffic that were shoves, not crashes (tests). */
+  bumps = 0;
 
   /** Race starts + speed events for the maps. */
   private mapMarkers(): MapMarker[] {
@@ -1758,7 +1814,7 @@ export class Game {
 
   private playerState() {
     const car = this.car;
-    return { x: car.x, z: car.z, vx: car.vx, vz: car.vz, heading: car.heading, radius: car.radius, length: car.def.body.length, width: car.def.body.width };
+    return { x: car.x, y: car.y, z: car.z, vx: car.vx, vz: car.vz, heading: car.heading, radius: car.radius, length: car.def.body.length, width: car.def.body.width };
   }
 
   /** Steps traffic AI once per frame (collisions are handled per physics sub-step). */
@@ -1775,47 +1831,42 @@ export class Game {
     for (const r of ev.rubs) {
       this.rubs++;
       this.nearMiss.touched(r.car.id);
-      car.x += r.nx * r.depth;
-      car.z += r.nz * r.depth;
-      const vn = car.vx * r.nx + car.vz * r.nz;
-      const tv = Math.sin(r.car.heading) * r.car.v * r.nx + Math.cos(r.car.heading) * r.car.v * r.nz;
-      if (vn < tv) {
-        car.vx += (tv - vn) * r.nx;
-        car.vz += (tv - vn) * r.nz;
-      }
+      slideOff(car, { ...r, vx: Math.sin(r.car.heading) * r.car.v, vz: Math.cos(r.car.heading) * r.car.v });
       this.rubTime = 0.15;
     }
+    // Bumps: a firm tap. The traffic car was shoved along its lane; we keep
+    // going, minus only what it took to shove it. A thud, no sparks, no
+    // offence, no lost drift.
+    for (const b of ev.bumps) {
+      this.bumps++;
+      this.nearMiss.touched(b.car.id);
+      slideOff(car, b);
+      if (this.simTime - this.lastImpactSound > 0.2) {
+        this.audio.impact(clamp(b.impact / 40, 0.08, 0.3));
+        this.lastImpactSound = this.simTime;
+      }
+      this.rig.bump(clamp(b.impact / 60, 0.03, 0.15));
+    }
     for (const h of ev.hits) {
-      // The player's car loses some speed and gets nudged away.
+      // A real crash: momentum shared by mass - the hero car loses its share
+      // of the closing speed and ploughs on (a bus stops you, a sedan does not).
       const s = clamp(h.impact / 25, 0, 1);
-      const dx = car.x - h.car.x;
-      const dz = car.z - h.car.z;
-      const d = Math.hypot(dx, dz) || 1;
-      const nx = dx / d;
-      const nz = dz / d;
-      const vn = car.vx * nx + car.vz * nz;
-      if (vn < 0) {
-        car.vx -= vn * nx * 1.2;
-        car.vz -= vn * nz * 1.2;
+      car.x += h.nx * h.depth;
+      car.z += h.nz * h.depth;
+      const vn = car.vx * h.nx + car.vz * h.nz;
+      if (vn < 0) crashKick(car, h.nx, h.nz, Math.min(h.impact, -vn), h.share);
+      if (this.simTime - this.lastImpactSound > 0.12) {
+        this.audio.impact(clamp(s * 1.2, 0.15, 1));
+        this.lastImpactSound = this.simTime;
       }
-      car.vx *= 1 - 0.18 * s;
-      car.vz *= 1 - 0.18 * s;
-      car.x += nx * 0.15;
-      car.z += nz * 0.15;
-      if (h.impact > 2) {
-        if (this.simTime - this.lastImpactSound > 0.12) {
-          this.audio.impact(clamp(s * 1.2, 0.15, 1));
-          this.lastImpactSound = this.simTime;
-        }
-        this.rig.bump(s * 0.8);
-        for (let i = 0; i < 6 + s * 24; i++) {
-          this.effects.sparks.emit(h.x, car.y + 0.5 + Math.random() * 0.4, h.z, (Math.random() - 0.5) * 8, Math.random() * 4 + 1, (Math.random() - 0.5) * 8, 0.3 + Math.random() * 0.3, 0.13, -0.1, 1, 0.8, 0.4);
-        }
-        this.trafficHits++;
-        this.nearMiss.touched((h.car as { id: number }).id);
-        if (this.drift.points > 0 && h.impact > 7) this.drift.reset();
-        if (h.impact > 4) this.offence("rammed-car");
+      this.rig.bump(s * 0.7);
+      for (let i = 0; i < 6 + s * 24; i++) {
+        this.effects.sparks.emit(h.x, car.y + 0.5 + Math.random() * 0.4, h.z, (Math.random() - 0.5) * 8, Math.random() * 4 + 1, (Math.random() - 0.5) * 8, 0.3 + Math.random() * 0.3, 0.13, -0.1, 1, 0.8, 0.4);
       }
+      this.trafficHits++;
+      this.nearMiss.touched(h.car.id);
+      if (this.drift.points > 0 && h.impact > 16) this.drift.reset();
+      this.offence("rammed-car");
     }
     for (const hn of ev.horns) {
       const [right, fwd] = this.relative(hn.car.x, hn.car.z);
@@ -1920,8 +1971,9 @@ export class Game {
   }
 
   /** Test-only: put the car somewhere specific. */
-  teleport(x: number, z: number, heading: number): void {
-    this.car.place(x, z, heading, this.city.ground(x, z));
+  /** Moves the car (tests, debug). `y` picks the level where roads are stacked (default: the top one). */
+  teleport(x: number, z: number, heading: number, y?: number): void {
+    this.car.place(x, z, heading, this.city.ground(x, z, y));
     this.snapPrev();
     this.rig.snap();
   }

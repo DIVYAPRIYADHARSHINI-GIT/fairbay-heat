@@ -24,6 +24,7 @@ import { signalState, type Light, type RNode, type Road } from "../game/roads";
 import { CURB, TERRAIN_STEP, WATER_LEVEL, WORLD_HALF, coastN, fbm, freshWaterDistance, type Building, type BuildingStyle, type World } from "../game/world";
 import { LAKE, RIVER, RIVER_HALF, toWorld } from "../game/mapdata";
 import * as T from "./textures";
+import { releaseCanvas } from "./textures";
 
 // ---------------------------------------------------------------------------
 // Geometry builder
@@ -68,17 +69,54 @@ class Geo {
     this.idx.push(i, i + 1, i + 2);
   }
 
+  /**
+   * Packs the geometry for the GPU, compactly: positions as float32, normals
+   * as normalized int8 (3 bytes instead of 12), UVs as float16-friendly
+   * float32 (repeating textures need the range), colours as normalized
+   * uint8 (3 bytes instead of 12). The CPU copies are released once the GPU
+   * has them (see `releaseAfterUpload`).
+   */
   build(): THREE.BufferGeometry {
     const g = new THREE.BufferGeometry();
+    const n = this.count;
     g.setAttribute("position", new THREE.Float32BufferAttribute(this.pos, 3));
-    g.setAttribute("normal", new THREE.Float32BufferAttribute(this.nor, 3));
+    const nor = new Int8Array(n * 3);
+    for (let i = 0; i < n * 3; i++) nor[i] = Math.round(Math.max(-1, Math.min(1, this.nor[i])) * 127);
+    g.setAttribute("normal", new THREE.BufferAttribute(nor, 3, true));
     g.setAttribute("uv", new THREE.Float32BufferAttribute(this.uv, 2));
-    g.setAttribute("color", new THREE.Float32BufferAttribute(this.col, 3));
-    g.setIndex(this.count > 65535 ? new THREE.Uint32BufferAttribute(this.idx, 1) : new THREE.Uint16BufferAttribute(this.idx, 1));
+    const col = new Uint8Array(n * 3);
+    for (let i = 0; i < n * 3; i++) col[i] = Math.round(Math.max(0, Math.min(1, this.col[i])) * 255);
+    g.setAttribute("color", new THREE.BufferAttribute(col, 3, true));
+    g.setIndex(n > 65535 ? new THREE.Uint32BufferAttribute(this.idx, 1) : new THREE.Uint16BufferAttribute(this.idx, 1));
     g.computeBoundingSphere();
+    releaseAfterUpload(g);
     return g;
   }
+
+  /** Frees the builder's arrays. */
+  clear(): void {
+    this.pos = [];
+    this.nor = [];
+    this.uv = [];
+    this.col = [];
+    this.idx = [];
+  }
 }
+
+/**
+ * Static world geometry never changes after it is built, so once WebGL has
+ * uploaded a buffer the CPU copy is dead weight: drop it (Three.js calls
+ * `onUploadCallback` right after the upload). Bounding volumes are computed
+ * before, so culling still works. Halves the memory the city takes.
+ */
+export function releaseAfterUpload(g: THREE.BufferGeometry): void {
+  const free = function (this: THREE.BufferAttribute) {
+    (this as { array: unknown }).array = EMPTY;
+  };
+  for (const a of Object.values(g.attributes)) (a as THREE.BufferAttribute).onUploadCallback = free;
+  if (g.index) g.index.onUploadCallback = free;
+}
+const EMPTY = new Float32Array(0);
 
 const CHUNK = 256;
 const WHITE = new THREE.Color(1, 1, 1);
@@ -143,13 +181,21 @@ export function buildWorldView(world: World, maxAniso: number): WorldView {
   const shop = T.shopfront();
   for (const t of [shop.map, shop.emissive]) tex(t);
   const shopMat = new THREE.MeshStandardMaterial({ map: shop.map, emissiveMap: shop.emissive, emissive: new THREE.Color(1, 1, 1), emissiveIntensity: 0, vertexColors: true, roughness: 0.25, metalness: 0.3 });
+  // Road paint is retroreflective: at night the lane lines show up faintly
+  // (their own colour) so you can read the road ahead without headlights.
+  const paintGlow = { value: 0 };
+  const paintMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.55, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -4 });
+  paintMat.onBeforeCompile = (sh) => {
+    sh.uniforms.uGlow = paintGlow;
+    sh.fragmentShader = "uniform float uGlow;\n" + sh.fragmentShader.replace("#include <emissivemap_fragment>", "#include <emissivemap_fragment>\n  totalEmissiveRadiance += vColor.rgb * uGlow;");
+  };
   const mats: Record<Exclude<Mat, BuildingStyle>, THREE.Material> = {
     roof: new THREE.MeshStandardMaterial({ map: tex(T.roofTex()), vertexColors: true, roughness: 0.95 }),
     shingle: new THREE.MeshStandardMaterial({ map: tex(T.shingles()), vertexColors: true, roughness: 0.85 }),
     asphalt: new THREE.MeshStandardMaterial({ map: asphaltTex, vertexColors: true, roughness: 0.88, color: 0xb0b0b0 }),
     sidewalk: new THREE.MeshStandardMaterial({ map: tex(T.sidewalk()), vertexColors: true, roughness: 0.9 }),
     curb: new THREE.MeshStandardMaterial({ map: tex(T.concrete()), vertexColors: true, roughness: 0.9 }),
-    paint: new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.55, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -4 }),
+    paint: paintMat,
     concrete: new THREE.MeshStandardMaterial({ map: tex(T.concrete()), vertexColors: true, roughness: 0.85 }),
     ramp: new THREE.MeshStandardMaterial({ map: tex(T.concrete()), vertexColors: true, roughness: 0.6, metalness: 0.4 }),
     rampSide: new THREE.MeshStandardMaterial({ map: tex(T.hazardStripes()), vertexColors: true, roughness: 0.7 }),
@@ -176,8 +222,12 @@ export function buildWorldView(world: World, maxAniso: number): WorldView {
   };
 
   // ---- roads ---------------------------------------------------------------------
-  for (const r of world.net.roads) buildRoad(r, geo, world);
+  for (const r of world.net.roads) buildRoad(r, geo);
   for (const n of world.net.nodes.values()) buildJunction(n, world, geo);
+  // Overpass columns and cap beams: exactly the (solid) ones the world built.
+  const pierGrey = new THREE.Color(0.82, 0.82, 0.8);
+  for (const p of world.piers) boxObb(geo(p.x, p.z, "bridge"), p.x, p.z, 0.8, 0.8, p.ang, p.y0, p.y1, pierGrey);
+  for (const c of world.pierCaps) boxObb(geo(c.x, c.z, "bridge"), c.x, c.z, 0.9, c.half, c.ang, c.y - 1.1, c.y, pierGrey);
 
   // ---- buildings -----------------------------------------------------------------
   const rng = mulberry32(world.seed + 99);
@@ -209,6 +259,7 @@ export function buildWorldView(world: World, maxAniso: number): WorldView {
     for (const [k, g] of m) {
       if (g.count === 0) continue;
       const mesh = new THREE.Mesh(g.build(), material(k));
+      g.clear();
       const big = styles.includes(k as BuildingStyle) || k === "roof" || k === "shingle" || k === "ramp" || k === "rampSide" || k === "bridge" || k === "hvac";
       mesh.castShadow = big;
       mesh.receiveShadow = true;
@@ -217,6 +268,11 @@ export function buildWorldView(world: World, maxAniso: number): WorldView {
       group.add(mesh);
     }
   }
+
+  // The builders are done: drop them. (The closures returned below keep
+  // this whole scope alive, so anything left here - ~90 MB of number arrays
+  // before - would stay in memory for the life of the game.)
+  chunks.clear();
 
   // ---- terrain + water --------------------------------------------------------------
   group.add(buildTerrain(world, maxAniso));
@@ -235,6 +291,7 @@ export function buildWorldView(world: World, maxAniso: number): WorldView {
   group.add(buildSigns(world));
 
   const emissiveMats = Object.values(facadeMats);
+  let nightLevel = 0;
   const waterNormals = (water[0].material as THREE.MeshStandardMaterial).normalMap!;
   return {
     group,
@@ -242,6 +299,8 @@ export function buildWorldView(world: World, maxAniso: number): WorldView {
     setNight(n: number) {
       for (const m of emissiveMats) m.emissiveIntensity = n * 1.1;
       shopMat.emissiveIntensity = 0.15 + n * 1.25;
+      paintGlow.value = n * 0.075;
+      nightLevel = n;
       lamps.setNight(n);
       signals.setNight(n);
     },
@@ -254,8 +313,11 @@ export function buildWorldView(world: World, maxAniso: number): WorldView {
       // sky and lights); pavements and kerbs a bit; roofs slightly.
       const a = mats.asphalt as THREE.MeshStandardMaterial;
       a.roughness = 0.88 - 0.62 * w;
-      a.color.setScalar(0.69 * (1 - 0.32 * w));
-      a.envMapIntensity = 1 + 1.4 * w;
+      // Asphalt reflects only ~5% of the light: under moonlight that is
+      // black. At night it is lifted (like the eye adapting to the dark, or
+      // a game's night grade) so the road reads between the street lights.
+      a.color.setScalar(0.69 * (1 - 0.32 * w) * (1 + 1.1 * nightLevel));
+      a.envMapIntensity = 1 + 1.4 * w + 1.5 * nightLevel;
       for (const k of ["sidewalk", "plaza", "curb", "concrete", "bridge"] as const) {
         const m = mats[k] as THREE.MeshStandardMaterial;
         m.roughness = 0.88 - 0.4 * w;
@@ -356,7 +418,30 @@ function wall(r: Road, g: (x: number, z: number, k: Mat) => Geo, k: Mat, lat: nu
   }
 }
 
-function buildRoad(r: Road, g: (x: number, z: number, k: Mat) => Geo, world: World): void {
+/**
+ * The underside of a raised deck, `depth` m below the road surface, facing
+ * DOWN so it is seen from beneath. (It used to be a ribbon with the deck
+ * top's upward winding - back-face culled from below - so from underneath a
+ * viaduct looked like two floating side beams with open sky between them.)
+ */
+function underside(r: Road, g: (x: number, z: number, k: Mat) => Geo, ext: number, a: number, b: number, depth: number, col: THREE.Color): void {
+  for (let s = a; s < b - 0.5; s += 4) {
+    const e = Math.min(b, s + 4);
+    const p0 = r.center.sample(s);
+    const p1 = r.center.sample(e);
+    const t0 = r.center.tangent(s);
+    const t1 = r.center.tangent(e);
+    const y0 = r.heightAt(s) - depth;
+    const y1 = r.heightAt(e) - depth;
+    const A = [p0.x - t0.tz * ext, y0, p0.z + t0.tx * ext];
+    const B = [p0.x + t0.tz * ext, y0, p0.z - t0.tx * ext];
+    const C = [p1.x + t1.tz * ext, y1, p1.z - t1.tx * ext];
+    const D = [p1.x - t1.tz * ext, y1, p1.z + t1.tx * ext];
+    g(p0.x, p0.z, "bridge").face([A, B, C, D], [0, -1, 0], [[0, 0], [ext / 2, 0], [ext / 2, (e - s) / 4], [0, (e - s) / 4]], col);
+  }
+}
+
+function buildRoad(r: Road, g: (x: number, z: number, k: Mat) => Geo): void {
   const k = r.spec;
   const s0 = Math.max(0, r.s0 - 1);
   const s1 = Math.min(r.length, r.s1 + 1);
@@ -383,51 +468,14 @@ function buildRoad(r: Road, g: (x: number, z: number, k: Mat) => Geo, world: Wor
     for (const side of [1, -1]) {
       wall(r, g, "bridge", side * ext, a, b, -1.4, 0.95, grey);
     }
-    ribbon(r, g, "bridge", -ext, ext, a, b, -1.4, 4, new THREE.Color(0.5, 0.5, 0.5));
-    // Under-deck face (visible when driving beneath): reversed ribbon.
-    for (let s = a; s < b - 0.5; s += 4) {
-      const e = Math.min(b, s + 4);
-      const p0 = r.center.sample(s);
-      const p1 = r.center.sample(e);
-      const t0 = r.center.tangent(s);
-      const t1 = r.center.tangent(e);
-      const y0 = r.heightAt(s) - 1.4;
-      const y1 = r.heightAt(e) - 1.4;
-      const G = g(p0.x, p0.z, "bridge");
-      const A = [p0.x - t0.tz * ext, y0, p0.z + t0.tx * ext];
-      const B = [p0.x + t0.tz * ext, y0, p0.z - t0.tx * ext];
-      const C = [p1.x + t1.tz * ext, y1, p1.z - t1.tx * ext];
-      const D = [p1.x - t1.tz * ext, y1, p1.z + t1.tx * ext];
-      G.face([A, D, C, B], [0, -1, 0], [[0, 0], [1, 0], [1, 1], [0, 1]], new THREE.Color(0.42, 0.42, 0.42));
-    }
-    // Column bents every ~30 m where the deck is > 4 m above the terrain
-    // and the column does not land on another road.
-    for (let s = a + 12; s < b - 6; s += 30) {
-      const p = r.center.sample(s);
-      const t = r.center.tangent(s);
-      const y = r.heightAt(s) - 1.4;
-      for (const lat of r.cls === "freeway" ? [-ext * 0.62, 0, ext * 0.62] : [0]) {
-        const x = p.x - t.tz * lat;
-        const z = p.z + t.tx * lat;
-        const ground = world.terrainAt(x, z);
-        if (y - ground < 4) continue;
-        let blocked = false;
-        for (const o of world.net.roadsAt(x, z)) if (o.road !== r) blocked = true;
-        if (world.net.roadAt(x, z, 1.2, ground)?.road !== undefined && world.net.roadAt(x, z, 1.2, ground)!.road !== r) blocked = true;
-        if (blocked) continue;
-        const G = g(x, z, "bridge");
-        boxObb(G, x, z, 0.8, 0.8, Math.atan2(t.tz, t.tx), ground - 0.5, y, grey);
-      }
-      // Cap beam across the bent.
-      const G = g(p.x, p.z, "bridge");
-      boxObb(G, p.x, p.z, 0.9, ext * 0.85, Math.atan2(t.tz, t.tx), y - 1.1, y, grey);
-    }
+    // Shaded concrete: only sky bounce reaches it.
+    underside(r, g, ext, a, b, 1.4, new THREE.Color(0.3, 0.3, 0.3));
   }
   // Bridges: deck underside, sides and piers.
   for (const [b0, b1] of r.bridges) {
     const ext = hw + r.sidewalk + 0.4;
     for (const side of [1, -1]) wall(r, g, "bridge", side * ext, Math.max(s0, b0), Math.min(s1, b1), -1.6, 0.25, new THREE.Color(0.85, 0.85, 0.85));
-    ribbon(r, g, "bridge", -ext, ext, Math.max(s0, b0), Math.min(s1, b1), -1.6, 4, new THREE.Color(0.55, 0.55, 0.55));
+    underside(r, g, ext, Math.max(s0, b0), Math.min(s1, b1), 1.6, new THREE.Color(0.36, 0.36, 0.36));
     for (let s = b0 + 14; s < b1 - 8; s += 26) {
       const p = r.center.sample(s);
       const y = r.heightAt(s);
@@ -876,10 +924,15 @@ function buildTerrain(world: World, maxAniso: number): THREE.Mesh {
   }
   const g = new THREE.BufferGeometry();
   g.setAttribute("position", new THREE.BufferAttribute(pos, 3));
-  g.setAttribute("color", new THREE.BufferAttribute(col, 3));
+  // Colours as normalized bytes (a quarter of the float size).
+  const col8 = new Uint8Array(col.length);
+  for (let i = 0; i < col.length; i++) col8[i] = Math.round(Math.min(1, Math.max(0, col[i])) * 255);
+  g.setAttribute("color", new THREE.BufferAttribute(col8, 3, true));
   g.setAttribute("uv", new THREE.BufferAttribute(uv, 2));
   g.setIndex(new THREE.BufferAttribute(idx, 1));
   g.computeVertexNormals();
+  g.computeBoundingSphere();
+  releaseAfterUpload(g);
   const t = T.grass();
   t.anisotropy = maxAniso;
   const mesh = new THREE.Mesh(g, new THREE.MeshStandardMaterial({ map: t, vertexColors: true, roughness: 1 }));
@@ -970,9 +1023,10 @@ function buildLamps(world: World) {
   poles.castShadow = true;
   const poolTex = T.radial("rgba(255,214,150,0.55)", "rgba(255,214,150,0)", 128);
   const poolMat = new THREE.MeshBasicMaterial({ map: poolTex, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, opacity: 0, polygonOffset: true, polygonOffsetFactor: -4, polygonOffsetUnits: -4 });
-  const poolGeo = new THREE.PlaneGeometry(11, 11);
+  // Light pool under each lamp: ~14 m across, centred under the lamp head.
+  const poolGeo = new THREE.PlaneGeometry(14, 14);
   poolGeo.rotateX(-Math.PI / 2);
-  poolGeo.translate(0, 0.06, 2.6);
+  poolGeo.translate(0, 0.06, 3);
   const pools = new THREE.InstancedMesh(poolGeo, poolMat, n);
   const pools2 = new THREE.InstancedMesh(poolGeo, poolMat, n);
   const index = new Map<number, number>();
@@ -1023,7 +1077,7 @@ function buildLamps(world: World) {
     group,
     setNight(v: number) {
       headMat.emissiveIntensity = v * 6;
-      poolMat.opacity = v * 0.6;
+      poolMat.opacity = v * 0.8;
       pools.visible = pools2.visible = v > 0.02;
     },
     breakLamp(c: CircleCollider) {
@@ -1222,6 +1276,7 @@ function leafMaterial(): THREE.MeshStandardMaterial {
 
 function buildBarriers(world: World): THREE.Group {
   const group = new THREE.Group();
+  const concreteTex = T.concrete();
   const jersey = world.barriers.filter((b) => b.kind === "jersey");
   const rails = world.barriers.filter((b) => b.kind === "rail");
   const m = new THREE.Matrix4();
@@ -1239,7 +1294,7 @@ function buildBarriers(world: World): THREE.Group {
   const jg = new THREE.ExtrudeGeometry(shape, { depth: 1, bevelEnabled: false });
   jg.translate(0, 0, -0.5);
   jg.rotateY(Math.PI / 2);
-  const jm = new THREE.InstancedMesh(jg, new THREE.MeshStandardMaterial({ map: T.concrete(), color: 0xd0d0cc, roughness: 0.9 }), Math.max(1, jersey.length));
+  const jm = new THREE.InstancedMesh(jg, new THREE.MeshStandardMaterial({ map: concreteTex, color: 0xd0d0cc, roughness: 0.9 }), Math.max(1, jersey.length));
   jersey.forEach((b, i) => {
     q.setFromAxisAngle(up, -Math.atan2(b.box.s, b.box.c));
     m.compose(new THREE.Vector3(b.box.cx, b.y0, b.box.cz), q, new THREE.Vector3(b.box.hx * 2, 1, 1));
@@ -1480,7 +1535,7 @@ function buildSigns(world: World): THREE.Group {
     g.textAlign = "center";
     g.textBaseline = "middle";
     g.fillText(r.name, 128, 25);
-    const tx = new THREE.CanvasTexture(c);
+    const tx = releaseCanvas(new THREE.CanvasTexture(c));
     tx.colorSpace = THREE.SRGBColorSpace;
     const sign = new THREE.Mesh(new THREE.PlaneGeometry(2.4, 0.45), new THREE.MeshStandardMaterial({ map: tx, side: THREE.DoubleSide, roughness: 0.6 }));
     sign.position.set(x, y + 2.9, z);

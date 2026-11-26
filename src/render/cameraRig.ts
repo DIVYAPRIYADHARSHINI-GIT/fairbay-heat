@@ -114,7 +114,10 @@ export class CameraRig {
       const y = ry + (want.y - ry) * t;
       let blocked = false;
       for (const c of near) {
-        if (c.kind === "circle" || c.base + c.top < y || c.top > 900) continue;
+        // Only obstacles at the camera's height block it: not low kerbs it
+        // looks over, and not a bridge's parapets passing OVER it (they
+        // start well above the camera when driving under a viaduct).
+        if (c.kind === "circle" || c.base + c.top < y || c.base > y + 0.5 || c.top > 900) continue;
         if (collide(x, z, 0.4, c)) {
           blocked = true;
           break;

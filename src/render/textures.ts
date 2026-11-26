@@ -23,6 +23,35 @@ function tex(c: HTMLCanvasElement, srgb = true, repeat = true): THREE.CanvasText
   t.anisotropy = 8;
   t.generateMipmaps = true;
   t.minFilter = THREE.LinearMipmapLinearFilter;
+  return releaseCanvas(t);
+}
+
+/**
+ * Once WebGL has a texture, its source canvas (4 bytes a pixel of CPU-side
+ * memory, plus the browser's own backing store) is no longer needed: shrink
+ * it to 1x1 right after the upload. Textures are drawn once at load and
+ * never redrawn, so nothing needs the pixels again.
+ */
+export function releaseCanvas<X extends THREE.Texture>(t: X): X {
+  const prev = t.onUpdate;
+  t.onUpdate = (tx: THREE.Texture) => {
+    prev?.(tx);
+    const img = tx.image as HTMLCanvasElement | undefined;
+    if (img && "getContext" in img && img.width > 1) {
+      // Keep the real size known to Three.js (mip levels, sampler setup).
+      tx.userData.size = [img.width, img.height];
+      img.width = 1;
+      img.height = 1;
+    }
+  };
+  return t;
+}
+
+/** One shared instance per generator (concrete, sidewalk, grass... were drawn up to 7 times). */
+const shared = new Map<string, THREE.CanvasTexture>();
+function once(key: string, make: () => THREE.CanvasTexture): THREE.CanvasTexture {
+  let t = shared.get(key);
+  if (!t) shared.set(key, (t = make()));
   return t;
 }
 
@@ -76,6 +105,10 @@ export function asphalt(): THREE.CanvasTexture {
 }
 
 export function sidewalk(): THREE.CanvasTexture {
+  return once("sidewalk", draw_sidewalk);
+}
+
+function draw_sidewalk(): THREE.CanvasTexture {
   const rng = mulberry32(12);
   const [c, ctx] = canvas(256);
   noise(ctx, 256, 256, rng, 168, 22);
@@ -97,6 +130,10 @@ export function sidewalk(): THREE.CanvasTexture {
 }
 
 export function grass(): THREE.CanvasTexture {
+  return once("grass", draw_grass);
+}
+
+function draw_grass(): THREE.CanvasTexture {
   const rng = mulberry32(13);
   const [c, ctx] = canvas(256);
   noise(ctx, 256, 256, rng, 150, 70, [0.62, 0.86, 0.36]);
@@ -108,6 +145,10 @@ export function grass(): THREE.CanvasTexture {
 }
 
 export function gravel(): THREE.CanvasTexture {
+  return once("gravel", draw_gravel);
+}
+
+function draw_gravel(): THREE.CanvasTexture {
   const rng = mulberry32(14);
   const [c, ctx] = canvas(256);
   noise(ctx, 256, 256, rng, 140, 60, [1, 0.96, 0.9]);
@@ -115,6 +156,10 @@ export function gravel(): THREE.CanvasTexture {
 }
 
 export function concrete(): THREE.CanvasTexture {
+  return once("concrete", draw_concrete);
+}
+
+function draw_concrete(): THREE.CanvasTexture {
   const rng = mulberry32(15);
   const [c, ctx] = canvas(256);
   noise(ctx, 256, 256, rng, 178, 18);

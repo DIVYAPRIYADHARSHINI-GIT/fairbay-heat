@@ -2,21 +2,26 @@
  * Car-to-car contact, shared by the player, police units and race rivals.
  *
  * Cars are oriented boxes (their footprints). Every touch is classified by
- * its CLOSING SPEED along the contact normal:
+ * its CLOSING SPEED along the contact normal into three tiers:
  *
  *  - below RUB_SPEED it is a RUB: the cars are separated and the part of
  *    their velocity that drives them into each other is removed - nothing
  *    else. They slide past each other side by side (no bounce, no speed
  *    loss, no crash effects). Brushing a car while weaving through traffic
  *    is a rub.
- *  - at or above RUB_SPEED it is a CRASH: the cars bounce apart a little,
- *    spin, and the game plays sparks, sound and camera shake; traffic cars
- *    are knocked out of their lane.
+ *  - from RUB_SPEED to CRASH_SPEED it is a BUMP: a shove, not a crash. The
+ *    closing speed is shared out by mass (perfectly inelastic - nobody
+ *    bounces back, nobody stops dead); a traffic car is shoved along its
+ *    lane and keeps driving. A thud, a little shake.
+ *  - at or above CRASH_SPEED it is a CRASH: momentum is shared by mass with
+ *    a small bounce, cars spin, sparks fly; traffic cars are knocked out of
+ *    their lane. The heavier "hero" car ploughs on with most of its speed -
+ *    it never recoils off a sedan as if it were a wall.
  *
  * Cars touching side by side meet along their side faces, so only the
  * SIDEWAYS speed counts: brushing a car while weaving through traffic
  * closes at 1-4 m/s (a rub) even when overtaking it 100 km/h faster, while
- * rear-ending a car 20 km/h slower closes at 5.6 m/s (a crash).
+ * rear-ending a car 20 km/h slower closes at 5.6 m/s (a bump).
  */
 
 import { clamp } from "../core/math";
@@ -24,6 +29,45 @@ import type { CarPhysics } from "./physics";
 
 /** Closing speed (m/s, ~18 km/h) below which a touch is a rub, not a crash. */
 export const RUB_SPEED = 5;
+/** Closing speed (m/s, 45 km/h) from which a touch is a crash; between the two it is a bump. */
+export const CRASH_SPEED = 12.5;
+/** Restitution of a crash (how much of the closing speed bounces back). */
+export const CRASH_BOUNCE = 0.15;
+
+/** A car's effective mass in "hero car" units, for sharing out collisions. */
+export const PLAYER_MASS = 2.2;
+
+/** Share of a collision's closing speed taken by a physics car hitting a body of mass `m`. */
+export function shareAgainst(m: number): number {
+  return m / (m + PLAYER_MASS);
+}
+
+/**
+ * A car pushed out of a body it rubbed or bumped (`n` points from the body
+ * to the car, `vx/vz` is the body's velocity after the contact): separate,
+ * and drop only the part of the car's velocity that still drives into the
+ * body - no bounce, no stopping dead.
+ */
+export function slideOff(c: { x: number; z: number; vx: number; vz: number }, r: { nx: number; nz: number; depth: number; vx: number; vz: number }): void {
+  c.x += r.nx * r.depth;
+  c.z += r.nz * r.depth;
+  const vn = c.vx * r.nx + c.vz * r.nz;
+  const tv = r.vx * r.nx + r.vz * r.nz;
+  if (vn < tv) {
+    c.vx += (tv - vn) * r.nx;
+    c.vz += (tv - vn) * r.nz;
+  }
+}
+
+/**
+ * Crash response of a car that hit a body: it takes `share` of the closing
+ * speed (plus the bounce) along `n` (from the body to the car).
+ */
+export function crashKick(c: { vx: number; vz: number }, nx: number, nz: number, impact: number, share: number): void {
+  const dv = impact * share * (1 + CRASH_BOUNCE);
+  c.vx += nx * dv;
+  c.vz += nz * dv;
+}
 
 export interface CarHit {
   /** Unit normal pointing from car a to car b. */
@@ -136,6 +180,8 @@ export interface CarContactResult {
   hit: CarHit;
   /** Closing speed along the normal before the contact was resolved (m/s, > 0 = closing). */
   rel: number;
+  /** A shove between RUB_SPEED and CRASH_SPEED. */
+  bump: boolean;
   crash: boolean;
 }
 
@@ -156,10 +202,12 @@ export function resolveCars(a: CarPhysics, b: CarPhysics, wa = 0.5, wb = 0.5): C
   b.x += hit.nx * hit.depth * sb;
   b.z += hit.nz * hit.depth * sb;
   const rel = (a.vx - b.vx) * hit.nx + (a.vz - b.vz) * hit.nz;
-  const crash = rel >= RUB_SPEED;
+  const crash = rel >= CRASH_SPEED;
+  const bump = !crash && rel >= RUB_SPEED;
   if (rel > 0) {
-    // Rubs are perfectly inelastic along the normal (no bounce); crashes bounce a little.
-    const j = (crash ? 1.25 : 1) * rel;
+    // Rubs and bumps are perfectly inelastic along the normal (no bounce);
+    // crashes bounce a little.
+    const j = (crash ? 1 + CRASH_BOUNCE : 1) * rel;
     a.vx -= hit.nx * j * sa;
     a.vz -= hit.nz * j * sa;
     b.vx += hit.nx * j * sb;
@@ -174,5 +222,5 @@ export function resolveCars(a: CarPhysics, b: CarPhysics, wa = 0.5, wb = 0.5): C
     a.yawRate -= clamp(la * j * sa * 0.2, -2, 2);
     b.yawRate += clamp(lb * j * sb * 0.2, -3, 3);
   }
-  return { hit, rel: Math.max(0, rel), crash };
+  return { hit, rel: Math.max(0, rel), bump, crash };
 }

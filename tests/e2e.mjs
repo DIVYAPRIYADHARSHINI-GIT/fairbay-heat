@@ -386,7 +386,9 @@ try {
     rpmTrace.push({ rpm: p.rpm, gear: p.gearRaw });
   }
   await page.keyboard.up("KeyW");
-  const drops = rpmTrace.filter((p, i) => i > 0 && p.gear > rpmTrace[i - 1].gear && p.rpm < rpmTrace[i - 1].rpm - 300).length;
+  // A shift takes 0.16 s and the samples are 0.12 s apart, so a sample can
+  // land mid-shift: look at the lowest revs over the two samples after it.
+  const drops = rpmTrace.filter((p, i) => i > 0 && p.gear > rpmTrace[i - 1].gear && Math.min(p.rpm, rpmTrace[i + 1]?.rpm ?? p.rpm) < rpmTrace[i - 1].rpm - 300).length;
   check("the gearbox upshifts and the revs drop on each shift", drops >= 1, rpmTrace.map((p) => `${p.gear}:${Math.round(p.rpm)}`).join(" "));
   await press(page, "KeyM", 300);
   const mutedLevel = (await snap(page)).audioLevel;
@@ -566,12 +568,12 @@ try {
   s = await snap(page);
   check("after a bust the chase is over and the police leave", s.heatState === "calm" && s.units === 0 && s.busts === 1, `${s.heatState}, ${s.units} units`);
 
-  // Heat 3: roadblocks, sirens, units on the roads.
+  // Heat 4: roadblocks (from heat 4 since the police were toned down), sirens, units on the roads.
   await onRoad("main-2", 0.15, 0, true);
   await page.evaluate(() => {
     const g = window.__fh;
     g.traffic.target = 48;
-    g.heat.force(3);
+    g.heat.force(4);
     g.police.blockCool = 0;
   });
   await page.keyboard.down("KeyW");
@@ -581,7 +583,7 @@ try {
     .catch(() => false);
   await page.keyboard.up("KeyW");
   s = await snap(page);
-  check("at heat 3 a roadblock is set up on the road ahead", block && s.roadblocks === 1, `${s.roadblocks} roadblocks`);
+  check("at heat 4 a roadblock is set up on the road ahead", block && s.roadblocks === 1, `${s.roadblocks} roadblocks`);
   const rbInfo = await page.evaluate(() => {
     const g = window.__fh;
     const rb = g.police.roadblocks[0];
@@ -597,7 +599,8 @@ try {
     await waitSim(page, 0.6);
     await shot("24-roadblock");
   }
-  await waitSim(page, 3);
+  // Reinforcements arrive every ~6 s now (was 2.5 s).
+  await page.waitForFunction(() => window.__fh.police.units.filter((u) => u.mode === "pursue" || u.mode === "search").length >= 2, { timeout: 30000, polling: 250 }).catch(() => {});
   s = await snap(page);
   check("more units join at higher heat", s.units >= 2, `${s.units} units at heat ${s.heat}`);
   const sirens = await page.evaluate(() => window.__fh.audio.sirenCount);
@@ -774,6 +777,78 @@ try {
   });
   check("brushing past a car is a rub, not a crash (no knock-out, no crash effects)", rubbed.rubs > 0 && rubbed.hits === 0 && !rubbed.wrecked, JSON.stringify(rubbed));
   await brakeToStop(page);
+
+  // A firm tap from behind (~25 km/h closing) is a BUMP: the traffic car is
+  // shoved along its lane and drives on; we keep most of our speed.
+  const bumped = await page.evaluate(async () => {
+    const g = window.__fh;
+    g.traffic.clear();
+    g.traffic.target = 0;
+    const lane = g.city.net.road("i9-2").lanesFwd[1];
+    const t = g.traffic.add(lane, 300);
+    t.temper = 0.5;
+    t.v = 14;
+    g.traffic.step(1 / 60, null, t.x, t.z, null);
+    const h = t.heading;
+    const gap = (t.model.length + g.car.def.body.length) / 2 + 0.6;
+    g.teleport(t.x - Math.sin(h) * gap, t.z - Math.cos(h) * gap, h);
+    g.car.vx = Math.sin(h) * 21;
+    g.car.vz = Math.cos(h) * 21;
+    const hits0 = g.trafficHits;
+    const bumps0 = g.bumps;
+    await new Promise((r) => setTimeout(r, 500));
+    return { hits: g.trafficHits - hits0, bumps: g.bumps - bumps0, wrecked: t.wrecked > 0, tv: +t.v.toFixed(1), myKmh: +g.car.speedKmh.toFixed(0) };
+  });
+  check("a firm tap from behind is a bump: the car is shoved along its lane and drives on, you keep going", bumped.bumps > 0 && bumped.hits === 0 && !bumped.wrecked && bumped.tv > 14 && bumped.myKmh > 40, JSON.stringify(bumped));
+  await brakeToStop(page);
+
+  // Driving under the I-9 viaduct: no invisible wall, no jolt, the chase
+  // camera holds its distance, and the deck's underside is drawn overhead.
+  const under = await page.evaluate(async () => {
+    const g = window.__fh;
+    g.traffic.clear();
+    const r = g.city.net.road("main-0");
+    const p = g.city.net.pointOn("main-0", r.s0 + 1, r.laneOffset(0));
+    g.teleport(p.x, p.z, p.heading);
+    return { y0: g.car.y };
+  });
+  await waitSim(page, 0.4);
+  await page.keyboard.down("KeyW");
+  const samples = [];
+  for (let i = 0; i < 16; i++) {
+    await new Promise((r) => setTimeout(r, 110));
+    samples.push(await page.evaluate(() => { const g = window.__fh; const c = g.car; return { v: c.speedKmh, y: c.y, cam: Math.hypot(g.camera.position.x - c.x, g.camera.position.z - c.z) }; }));
+    if (i === 9) await shot("31-under-viaduct");
+  }
+  await page.keyboard.up("KeyW");
+  const vDrop = samples.slice(3).some((q, i) => q.v < samples.slice(3)[Math.max(0, i - 1)].v - 8);
+  const yJump = Math.max(...samples.map((q) => Math.abs(q.y - under.y0)));
+  const cams = samples.slice(4).map((q) => q.cam);
+  check("driving under the viaduct: no invisible wall, no jump onto the deck, the camera holds steady", !vDrop && yJump < 0.6 && Math.max(...cams) - Math.min(...cams) < 1.5, `y ${yJump.toFixed(2)} m, camera ${Math.min(...cams).toFixed(1)}..${Math.max(...cams).toFixed(1)} m, speeds ${samples.map((q) => q.v.toFixed(0)).join(",")}`);
+  // The deck underside is visible from below: sample the top of the screen (sky would be bright blue).
+  const roof = await page.evaluate(async () => {
+    const g = window.__fh;
+    g.car.vx = g.car.vz = 0;
+    const r = g.city.net.road("main-0");
+    const i9 = g.city.net.road("i9-2");
+    // Stand right under the deck.
+    let best = { s: r.s0, d: 1e9 };
+    for (let s = r.s0; s < r.s1; s += 0.5) { const p = r.center.sample(s); const q = i9.center.project(p.x, p.z); if (q.dist < best.d) best = { s, d: q.dist }; }
+    const p = g.city.net.pointOn("main-0", best.s, r.laneOffset(0));
+    g.teleport(p.x, p.z, p.heading, r.heightAt(best.s) + 0.3); // on the street, under the deck
+    await new Promise((res) => requestAnimationFrame(() => requestAnimationFrame(res)));
+    // Look straight up from the car.
+    g.camera.position.set(g.car.x, g.car.y + 1.5, g.car.z);
+    g.camera.lookAt(g.car.x, g.car.y + 50, g.car.z + 0.01);
+    g.renderer.render(g.scene, g.camera);
+    const gl = g.renderer.getContext();
+    const px = new Uint8Array(4);
+    gl.readPixels(gl.drawingBufferWidth >> 1, gl.drawingBufferHeight >> 1, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);
+    return { rgb: [...px.slice(0, 3)], under: g.car.y < 6 };
+  });
+  const skyish = roof.rgb[2] > 150 && roof.rgb[2] > roof.rgb[0] + 30;
+  check("looking up from under the viaduct you see the concrete deck, not open sky", roof.under && !skyish, `rgb ${roof.rgb.join(",")}, on the street: ${roof.under}`);
+  await page.evaluate(() => window.__fh.rig.snap());
   await page.evaluate(() => {
     const g = window.__fh;
     g.traffic.target = 48;
@@ -879,6 +954,35 @@ try {
   await holdSim(page, ["KeyW"], 2.5);
   s = await snap(page);
   check("night mode is active at 22:00", s.night > 0.9);
+  // Night visibility WITHOUT headlights: moonlight, sky glow and street
+  // lights must show the road and the city (the world part of the frame
+  // used to be ~70-95% near-black).
+  const nightVis = await page.evaluate(() => {
+    const g = window.__fh;
+    const hls = g.scene.children.filter((o) => o.isSpotLight);
+    for (const h of hls) h.visible = false;
+    g.renderer.render(g.scene, g.camera);
+    const gl = g.renderer.getContext();
+    const w = gl.drawingBufferWidth;
+    const h = gl.drawingBufferHeight;
+    const px = new Uint8Array(w * h * 4);
+    gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, px);
+    for (const l of hls) l.visible = true;
+    let sum = 0;
+    let n = 0;
+    let dark = 0;
+    for (let y = 0; y < Math.floor(h * 0.62); y += 3) {
+      for (let x = 0; x < w; x += 3) {
+        const i = (y * w + x) * 4;
+        const L = 0.2126 * px[i] + 0.7152 * px[i + 1] + 0.0722 * px[i + 2];
+        sum += L;
+        n++;
+        if (L < 12) dark++;
+      }
+    }
+    return { mean: sum / n, dark: dark / n };
+  });
+  check("at night the road and city are visible without headlights (moon, sky glow, street lights)", nightVis.mean > 25 && nightVis.dark < 0.4, `mean luma ${nightVis.mean.toFixed(1)}, ${(nightVis.dark * 100).toFixed(0)}% near-black`);
   // Night glare: right behind a traffic car and facing a wall, the view
   // ahead must not wash out to white.
   const glare = async () => {

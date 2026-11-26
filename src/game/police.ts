@@ -5,7 +5,7 @@
  *
  *  - PATROLS are ordinary traffic cars (model "police") driving the lane
  *    graph: they stop at lights, follow cars, indicate. Each one watches for
- *    offences in a 140 m, 150-degree cone (buildings block its view).
+ *    offences in a 120 m, 150-degree cone (buildings block its view).
  *  - UNITS are full physics cars (the same arcade `CarPhysics` as the
  *    player) with an AI driver. A patrol that witnesses an offence becomes a
  *    unit on the spot; more units join from out of sight as the heat rises.
@@ -19,7 +19,7 @@
  *  - backs out when stuck against a wall, and is taken out ("wrecked") by
  *    hard hits.
  *
- * Roadblocks (heat 3+) are parked units across a road ahead of the player,
+ * Roadblocks (heat 4+) are parked units across a road ahead of the player,
  * out of sight, with a gap at one kerb you can thread if you are brave.
  *
  * Everything here is pure simulation (no rendering) and runs headless in
@@ -34,7 +34,7 @@ import type { RNode, Road, RoadNetwork } from "./roads";
 import type { Collider, SpatialHash } from "./collision";
 import { POLICE_MODEL, type PlayerState, type Traffic, type TrafficCar } from "./traffic";
 import { enforcerShare, roadblocksAt, unitsForHeat, type HeatState } from "./heat";
-import { carContact, resolveCars } from "./contact";
+import { carContact, crashKick, resolveCars, slideOff } from "./contact";
 
 export { carContact };
 
@@ -139,6 +139,10 @@ export interface Unit {
   routeGoal: { x: number; z: number } | null;
   /** Seconds spent off the road network (a lost unit is recycled out of sight). */
   offRoad: number;
+  /** Seconds spent alongside trying a PIT; after a while the unit backs off. */
+  pitT: number;
+  /** Seconds left of dropping back after a PIT attempt (gives you an opening). */
+  backoff: number;
 }
 
 export interface Roadblock {
@@ -177,13 +181,21 @@ export interface PoliceEvents {
   horns: { car: TrafficCar; long: boolean }[];
 }
 
-/** Police vision: a patrol notices offences within 140 m; units already on a chase keep you in sight to 220 m. */
-export const SIGHT_RANGE = 140;
-export const PURSUIT_SIGHT = 220;
+/** Police vision: a patrol notices offences within 120 m; units already on a chase keep you in sight to 180 m. */
+export const SIGHT_RANGE = 120;
+export const PURSUIT_SIGHT = 180;
 const SIGHT_FOV = Math.cos((150 / 2) * (Math.PI / 180));
 /** Speed limits cops enforce (km/h): city streets, and highways (freeway, ramps, coast road). */
 export const SPEED_LIMIT_KMH = 95;
 export const HIGHWAY_LIMIT_KMH = 140;
+/** Share of a shove the player's car takes against a moving police unit (the rest moves the unit). */
+export const POLICE_PUSH_SHARE = 0.4;
+/** ...and against a car parked in a roadblock. */
+export const ROADBLOCK_PUSH_SHARE = 0.6;
+/** Clear width (m) left at one kerb of a roadblock - room to thread a car through. */
+export const ROADBLOCK_GAP = 3.8;
+/** Police top speed as a fraction of the player's car top speed, per heat level. */
+export const POLICE_SPEED_CAP = [0, 0.72, 0.78, 0.83, 0.88, 0.94];
 
 export class Police {
   readonly units: Unit[] = [];
@@ -226,6 +238,8 @@ export class Police {
           if (distToSeg(col.x, col.z, ax, az, bx, bz) < col.r) return false;
           continue;
         }
+        // Slim things (overpass columns, barrier rails) do not hide a car.
+        if (col.kind === "obb" && Math.min(col.hx, col.hz) < 1) continue;
         const c = col.kind === "box" ? boxCorners(col) : obbCorners(col);
         for (let i = 0; i < 4; i++) {
           const p = c[i];
@@ -246,6 +260,16 @@ export class Police {
     const dz = p.z - z;
     const d = Math.hypot(dx, dz);
     if (d > (alert ? PURSUIT_SIGHT : SIGHT_RANGE) || Math.abs(p.y - y) > 9) return false;
+    // A road deck between the two levels (one car on a viaduct, the other on
+    // the street underneath) blocks the view.
+    if (Math.abs(p.y - y) > 3.5) {
+      const lo = p.y < y ? { x: p.x, z: p.z, y: p.y } : { x, z, y };
+      const hi = Math.max(p.y, y);
+      for (const o of this.net.roadsAt(lo.x, lo.z)) {
+        const h = o.road.heightAt(o.s);
+        if (h > lo.y + 3 && h < hi + 1 && o.road.isBridge(o.s)) return false;
+      }
+    }
     if (d > 20 && !alert) {
       const f = (dx * Math.sin(heading) + dz * Math.cos(heading)) / d;
       if (f < SIGHT_FOV) return false;
@@ -336,6 +360,8 @@ export class Police {
       cursor: 0,
       routeGoal: null,
       offRoad: 0,
+      pitT: 0,
+      backoff: 0,
     };
     this.units.push(u);
     return u;
@@ -651,9 +677,9 @@ export class Police {
   private pursue(u: Unit, p: PlayerView, heat: number, dt: number): Controls {
     const c = u.phys;
     const d = Math.hypot(p.x - c.x, p.z - c.z);
-    // Units drive flat out, capped a little under the player's top speed at
-    // low heat so you can outrun them (heat 5 units can keep up).
-    const cap = Math.min(c.vmax, p.car.vmax * [0, 0.78, 0.84, 0.9, 0.96, 1.02][Math.min(5, heat)]);
+    // Units drive hard but are capped under the player's top speed, so a
+    // clean getaway works at every heat (heat 5 units come closest).
+    const cap = Math.min(c.vmax, p.car.vmax * POLICE_SPEED_CAP[Math.min(5, heat)]);
     if (u.sees && d < 45) {
       // Where is the unit relative to the player's car?
       const fx = Math.sin(p.heading);
@@ -662,6 +688,17 @@ export class Police {
       const rz = fx;
       const along = (c.x - p.x) * fx + (c.z - p.z) * fz;
       const side = (c.x - p.x) * rx + (c.z - p.z) * rz;
+      // Coming the other way, nose to nose: no head-on ramming (units used
+      // to aim straight at an oncoming player - 200 km/h closing). Move over
+      // to our right of the player's path, slow down, and let them pass; the
+      // unit turns round once they are behind it.
+      const headOn = c.forwardX * fx + c.forwardZ * fz < -0.5 && along > 0;
+      if (headOn && p.speed > 6) {
+        const away = side >= 0 ? 1 : -1;
+        const tx = p.x + fx * (along + 15) + rx * away * 5.5;
+        const tz = p.z + fz * (along + 15) + rz * away * 5.5;
+        return this.drive(u, tx, tz, Math.min(cap, 9), dt);
+      }
       if (p.speed < 4) {
         // Player (nearly) stopped: pull up right next to them and hold - that
         // is how a bust is made. Brake in time so we stop beside them
@@ -669,11 +706,18 @@ export class Police {
         if (d < 6) return holdControls(c);
         return this.drive(u, p.x, p.z, Math.min(cap, stoppingSpeed(d - 6.5)), dt, true);
       }
-      if (d < 24 && heat < 2) {
-        // Heat 1: tail the player at a few car lengths (no ramming yet).
-        const tx = p.x - Math.sin(p.heading) * 9;
-        const tz = p.z - Math.cos(p.heading) * 9;
-        return this.drive(u, tx, tz, Math.min(cap, p.speed + clamp((d - 9) * 0.6, -6, 6)), dt);
+      // Heat 1 (and any unit backing off after a PIT attempt): tail the
+      // player (no ramming) at a safe time gap - 9 m plus ~0.7 s - so a unit
+      // can always stop if you brake or crash, instead of tailgating at 0.3 s
+      // and ploughing into you.
+      const tail = 9 + p.speed * 0.7;
+      u.backoff = Math.max(0, u.backoff - dt);
+      if (d < tail + 15 && (heat < 2 || u.backoff > 0)) {
+        u.pitT = 0;
+        const tx = p.x - Math.sin(p.heading) * tail;
+        const tz = p.z - Math.cos(p.heading) * tail;
+        const v = Math.min(cap, p.speed + clamp((d - tail) * 0.5, -10, 5), stoppingSpeed(d - 7, 8) + p.speed * 0.5);
+        return this.drive(u, tx, tz, Math.max(0, v), dt);
       }
       if (d < 24) {
         // Heat 2+: get beside the rear quarter, then steer into it (PIT) - a
@@ -681,19 +725,33 @@ export class Police {
         if (Math.abs(side) > 0.8) u.side = Math.sign(side);
         const besideLat = (p.car.def.body.width + c.def.body.width) / 2 + 0.35;
         if (along > 2.5) {
-          // Ahead of the player: cut in front and brake-check.
-          return this.drive(u, p.x + fx * 9, p.z + fz * 9, Math.max(0, p.speed - 4), dt, true);
+          // Ahead of the player: move in front and ease off (no brake-check).
+          return this.drive(u, p.x + fx * 9, p.z + fz * 9, Math.max(0, p.speed - 1.5), dt, true);
         }
         if (along < -3.5) {
           // Behind: draw alongside the rear quarter, offset by a car width.
+          // While still straight behind you (in your path), hold a ~0.6 s gap
+          // so a sudden stop or crash ahead is not followed by a cop ploughing
+          // into your boot; once it is off to the side it may close in.
           const tx = p.x - fx * 2 + rx * u.side * besideLat;
           const tz = p.z - fz * 2 + rz * u.side * besideLat;
-          return this.drive(u, tx, tz, Math.min(cap, p.speed + clamp(-along * 0.6, 2, 8)), dt, true);
+          let v = Math.min(cap, p.speed + clamp(-along * 0.6, 2, 8));
+          if (Math.abs(side) < 1.6) v = Math.min(v, p.speed + (-along - (6 + p.speed * 0.6)) * 0.5);
+          return this.drive(u, tx, tz, Math.max(0, v), dt, true);
         }
-        // Alongside: steer into the rear wheel at matched speed.
-        const tx = p.x - fx * 1.8 + rx * u.side * (besideLat - 1.4);
-        const tz = p.z - fz * 1.8 + rz * u.side * (besideLat - 1.4);
-        return this.drive(u, tx, tz, Math.min(cap, p.speed + 1), dt, true);
+        // Alongside: lean in on the rear wheel at matched speed - a nudge
+        // (aims ~1.1 m into you, used to be 1.4 m), so a PIT unsettles
+        // the car instead of spinning it every time. A unit gives up after
+        // ~2.5 s alongside and drops back for 2 s before trying again, so it
+        // never rides glued to your door.
+        u.pitT += dt;
+        if (u.pitT > 2.5) {
+          u.pitT = 0;
+          u.backoff = 2;
+        }
+        const tx = p.x - fx * 1.8 + rx * u.side * (besideLat - 1.1);
+        const tz = p.z - fz * 1.8 + rz * u.side * (besideLat - 1.1);
+        return this.drive(u, tx, tz, Math.min(cap, p.speed + 0.5), dt, true);
       }
       // Lead pursuit: aim where the player will be.
       const lead = clamp(d / Math.max(12, c.speed + 1), 0, 1.2);
@@ -704,6 +762,17 @@ export class Police {
     const live = u.sees || (this.lastKnown && Math.hypot(this.lastKnown.x - p.x, this.lastKnown.z - p.z) < 1);
     const goal = u.sees ? { x: p.x, z: p.z } : (this.lastKnown ?? { x: p.x, z: p.z });
     const ctl = this.follow(u, goal, p.y, cap, dt, live ? p.speed : 0);
+    // Closing nose to nose along the road (the player racing straight at the
+    // unit): brake hard instead of meeting head-on at full speed.
+    if (ctl && d < 80 && p.speed > 6) {
+      const toP = { x: (p.x - c.x) / (d || 1), z: (p.z - c.z) / (d || 1) };
+      const facing = c.forwardX * toP.x + c.forwardZ * toP.z;
+      const oncoming = -(p.vx * toP.x + p.vz * toP.z) / p.speed;
+      if (facing > 0.8 && oncoming > 0.8) {
+        const vSafe = Math.min(cap, 6 + (d - 20) * 0.25);
+        if (c.vLong > vSafe) return { throttle: 0, brake: 1, steer: ctl.steer, handbrake: false, nitro: false };
+      }
+    }
     return ctl ?? this.backToRoad(u, dt);
   }
 
@@ -771,7 +840,7 @@ export class Police {
       if (d > SIGHT_RANGE) continue;
       // Patrols look along their lane; when a chase is on they look everywhere.
       if (!this.canSee(car.x, car.z, car.y, car.heading, p, active)) continue;
-      if (active || (speeding && d < 100)) {
+      if (active || (speeding && d < 80)) {
         if (!active) ev.witnessed.push("speeding");
         const u = this.promote(car);
         u.sees = true;
@@ -784,7 +853,7 @@ export class Police {
     const chasing = this.units.filter((u) => u.mode === "pursue" || u.mode === "search");
     this.spawnCool -= dt;
     if (active && chasing.length < unitsForHeat(heat) && this.spawnCool <= 0) {
-      this.spawnCool = 2.5;
+      this.spawnCool = 6;
       this.spawnUnit(p, heat);
     }
 
@@ -828,7 +897,7 @@ export class Police {
         u.siren = true;
         continue;
       }
-      if (u.sees && speeding && !active && d < 100) ev.witnessed.push("speeding");
+      if (u.sees && speeding && !active && d < 80) ev.witnessed.push("speeding");
       // Pursuit: every unit converges (on sightings radioed in). Cooldown:
       // only units that can see you chase; the rest search where you were
       // last seen. Chase over: they cruise off and leave once out of view.
@@ -863,7 +932,7 @@ export class Police {
       if (rb) {
         this.roadblocks.push(rb);
         ev.roadblock = rb;
-        this.blockCool = 34 - heat * 3;
+        this.blockCool = 55 - heat * 4;
       } else this.blockCool = 3;
     }
     for (const rb of [...this.roadblocks]) {
@@ -891,8 +960,11 @@ export class Police {
     for (const u of this.units) {
       const c = u.phys;
       const parked = u.mode === "roadblock";
-      // A parked roadblock car barely moves (wheels locked): it takes 15% of the push.
-      const res = resolveCars(pc, c, parked ? 0.85 : 0.5, parked ? 0.15 : 0.5);
+      // Push shares: a parked roadblock car is braced (you take ~60% of the
+      // hit - ramming one costs a lot of speed but you plough through it);
+      // a moving unit is lighter than your car (it takes ~60% of a shove),
+      // so a cop leaning on you nudges you rather than bulldozing you.
+      const res = resolveCars(pc, c, parked ? ROADBLOCK_PUSH_SHARE : POLICE_PUSH_SHARE, parked ? 1 - ROADBLOCK_PUSH_SHARE : 1 - POLICE_PUSH_SHARE);
       if (!res) continue;
       const { hit, rel } = res;
       // Rubs (side by side, brushing past) are not rams: no sparks, no
@@ -902,14 +974,16 @@ export class Police {
         // Who drove into whom: the player is ramming if they were moving into the cop.
         const into = pc.vx * hit.nx + pc.vz * hit.nz;
         const copInto = -(c.vx * hit.nx + c.vz * hit.nz);
-        const playerRam = res.crash && into > copInto && into > 5 && u.mode !== "wrecked";
-        if (!res.crash && !(copInto > into)) continue; // a light brush from the player
+        const hard = res.crash || res.bump;
+        const playerRam = hard && into > copInto && into > 5 && u.mode !== "wrecked";
+        if (!hard && !(copInto > into)) continue; // a light brush from the player
         u.hitCool = 0.5;
         ev.rams.push({ unit: u, impact: rel, x: hit.x, z: hit.z });
         if (playerRam) ev.witnessed.push("rammed-cop");
         if (u.mode !== "wrecked") {
-          // A unit's own PIT nudges barely hurt it; your hits do.
-          u.damage += (rel / (parked ? 30 : 40)) * (playerRam ? 1 : 0.2);
+          // A unit's own PIT nudges barely hurt it; your hits do (units are
+          // easier to take out than before: ~35 m/s of hits for a moving unit).
+          u.damage += (rel / (parked ? 24 : 35)) * (playerRam ? 1 : 0.2);
           if (u.damage >= 1) {
             u.mode = "wrecked";
             u.siren = false;
@@ -924,20 +998,14 @@ export class Police {
     for (const u of this.units) {
       if (u.mode === "roadblock") continue;
       const c = u.phys;
-      const tev = this.traffic.collide({ x: c.x, z: c.z, vx: c.vx, vz: c.vz, heading: c.heading, radius: c.radius, length: c.def.body.length, width: c.def.body.width });
-      for (const r of tev.rubs) {
-        c.x += r.nx * r.depth;
-        c.z += r.nz * r.depth;
-        const vn = c.vx * r.nx + c.vz * r.nz;
-        if (vn < 0) {
-          c.vx -= vn * r.nx;
-          c.vz -= vn * r.nz;
-        }
-      }
+      const tev = this.traffic.collide({ x: c.x, y: c.y, z: c.z, vx: c.vx, vz: c.vz, heading: c.heading, radius: c.radius, length: c.def.body.length, width: c.def.body.width });
+      for (const r of tev.rubs) slideOff(c, { ...r, vx: Math.sin(r.car.heading) * r.car.v, vz: Math.cos(r.car.heading) * r.car.v });
+      for (const b of tev.bumps) slideOff(c, b);
       for (const h of tev.hits) {
-        const k = 1 - 0.18 * clamp(h.impact / 25, 0, 1);
-        c.vx *= k;
-        c.vz *= k;
+        c.x += h.nx * h.depth;
+        c.z += h.nz * h.depth;
+        const vn = c.vx * h.nx + c.vz * h.nz;
+        if (vn < 0) crashKick(c, h.nx, h.nz, Math.min(h.impact, -vn), h.share);
       }
       ev.horns.push(...tev.horns);
     }
@@ -954,7 +1022,7 @@ export class Police {
 
   /** Traffic treats units like the player's car: it brakes for them instead of driving through. */
   trafficObstacles(): PlayerState[] {
-    return this.units.map((u) => ({ x: u.phys.x, z: u.phys.z, vx: u.phys.vx, vz: u.phys.vz, heading: u.phys.heading, radius: u.phys.radius, length: u.phys.def.body.length, width: u.phys.def.body.width }));
+    return this.units.map((u) => ({ x: u.phys.x, y: u.phys.y, z: u.phys.z, vx: u.phys.vx, vz: u.phys.vz, heading: u.phys.heading, radius: u.phys.radius, length: u.phys.def.body.length, width: u.phys.def.body.width }));
   }
 
   /**
@@ -983,7 +1051,7 @@ export class Police {
       // Cars parked across the carriageway at an angle, leaving one gap at a
       // random kerb: ~3 m clear, room for a car if you thread it at speed.
       const gapSide = this.rng() < 0.5 ? -1 : 1;
-      const GAP = 3.1;
+      const GAP = ROADBLOCK_GAP;
       // A car angled 60 degrees off the road axis covers this much road width.
       const cover = (L: number, W: number) => L * Math.sin(1.07) + W * Math.cos(1.07);
       const cw = cover(INTERCEPTOR.body.length, INTERCEPTOR.body.width);

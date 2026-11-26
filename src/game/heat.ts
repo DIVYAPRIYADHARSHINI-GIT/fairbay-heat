@@ -41,10 +41,10 @@ export const OFFENCE_BOUNTY: Record<Offence, number> = {
 export const EVADE_BOUNTY = 1000;
 
 /** Bounty needed to reach each heat level (index = level). */
-export const HEAT_THRESHOLDS = [0, 0, 6000, 18000, 40000, 80000];
+export const HEAT_THRESHOLDS = [0, 0, 8000, 24000, 52000, 100000];
 
 /** Seconds of chase that raise the heat level on their own (pressure builds). */
-export const HEAT_TIME = [0, 0, 45, 100, 170, 250];
+export const HEAT_TIME = [0, 0, 60, 140, 240, 360];
 
 export const MAX_HEAT = 5;
 
@@ -64,11 +64,11 @@ export interface HeatConfig {
 }
 
 export const DEFAULT_HEAT_CONFIG: HeatConfig = {
-  loseSight: 5,
-  cooldownBase: 12,
-  bustTime: 3.2,
-  bustSpeed: 3.5,
-  bustRange: 7.5,
+  loseSight: 4,
+  cooldownBase: 9,
+  bustTime: 4.5,
+  bustSpeed: 2.5,
+  bustRange: 6.5,
   endTime: 4,
 };
 
@@ -188,11 +188,12 @@ export class HeatSystem {
     if (!this.active) return ev;
     this.chaseTime += dt;
     // Busted meter: a unit right on you while you are (nearly) stopped -
-    // boxed in by two or more units, crawling counts too.
-    const slow = speed < this.cfg.bustSpeed || (boxed && speed < this.cfg.bustSpeed * 2);
+    // boxed in by two or more units, crawling counts too. It drains fast
+    // as soon as you get moving.
+    const slow = speed < this.cfg.bustSpeed || (boxed && speed < this.cfg.bustSpeed * 1.6);
     const pinned = nearest < this.cfg.bustRange && slow;
     if (pinned && this.state === "pursuit") this.bust = Math.min(1, this.bust + dt / this.cfg.bustTime);
-    else this.bust = Math.max(0, this.bust - dt / (this.cfg.bustTime * 0.6));
+    else this.bust = Math.max(0, this.bust - dt / (this.cfg.bustTime * 0.4));
     if (this.bust >= 1) {
       this.state = "busted";
       this.busts++;
@@ -261,15 +262,15 @@ export class HeatSystem {
 
 /** Police units allowed in the chase at a heat level (roadblock cars not counted). */
 export function unitsForHeat(heat: number): number {
-  return [0, 2, 3, 4, 5, 6][Math.max(0, Math.min(MAX_HEAT, Math.round(heat)))];
+  return [0, 1, 2, 3, 4, 5][Math.max(0, Math.min(MAX_HEAT, Math.round(heat)))];
 }
 
 /** Share of chasing units that are fast Enforcers (the rest are Interceptors). */
 export function enforcerShare(heat: number): number {
-  return [0, 0, 0, 0.34, 0.5, 0.67][Math.max(0, Math.min(MAX_HEAT, Math.round(heat)))];
+  return [0, 0, 0, 0, 0.34, 0.5][Math.max(0, Math.min(MAX_HEAT, Math.round(heat)))];
 }
 
-/** Roadblocks are set up from heat 3. */
+/** Roadblocks are set up from heat 4. */
 export function roadblocksAt(heat: number): boolean {
-  return heat >= 3;
+  return heat >= 4;
 }

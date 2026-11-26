@@ -95,6 +95,31 @@ export interface Barrier {
   kind: "jersey" | "rail";
 }
 
+/**
+ * A column under an overpass deck (solid: cars cannot drive through it).
+ * Built once here so the renderer draws exactly the columns the physics
+ * knows about.
+ */
+export interface Pier {
+  x: number;
+  z: number;
+  /** Axis angle of the bent (the road tangent). */
+  ang: number;
+  /** Ground height at the foot and height of the deck underside. */
+  y0: number;
+  y1: number;
+}
+
+/** A cap beam across an overpass bent (visual only - it is above the traffic). */
+export interface PierCap {
+  x: number;
+  z: number;
+  ang: number;
+  /** Half length across the road. */
+  half: number;
+  y: number;
+}
+
 export interface Container {
   x: number;
   z: number;
@@ -286,6 +311,9 @@ export class World {
   readonly trees: Prop[] = [];
   readonly pines: Prop[] = [];
   readonly barriers: Barrier[] = [];
+  /** Overpass columns (solid) and their cap beams. */
+  readonly piers: Pier[] = [];
+  readonly pierCaps: PierCap[] = [];
   readonly containers: Container[] = [];
   readonly tanks: Tank[] = [];
   readonly cranes: Crane[] = [];
@@ -349,6 +377,7 @@ export class World {
     this.circleCollider(this.circle.x, this.circle.z, this.islandR - 0.6, 3, this.net.nodes.get("rb-N")!.elev, false);
     if (!opts.bare) {
       this.buildBarriers();
+      this.buildPiers();
       this.buildBuildings(rng);
       this.buildLamps();
       this.buildPort(rng);
@@ -622,6 +651,46 @@ export class World {
           const off = r.hw + (bridge ? r.sidewalk : 0) + 0.25;
           place(off, "rail", bridge ? 1.0 : 0.75);
           place(-off, "rail", bridge ? 1.0 : 0.75);
+        }
+      }
+    }
+  }
+
+  /**
+   * Overpass column bents every ~30 m where the deck is more than 4 m above
+   * the ground and the column would not land on another carriageway. The
+   * columns are SOLID (0.8 m square) - before, they were scenery you could
+   * drive straight through.
+   */
+  private buildPiers(): void {
+    for (const r of this.net.roads) {
+      const s0 = Math.max(0, r.s0 - 1);
+      const s1 = Math.min(r.length, r.s1 + 1);
+      const ext = r.hw + r.sidewalk + 0.4;
+      for (const [o0, o1] of r.overpasses) {
+        const a = Math.max(s0, o0);
+        const b = Math.min(s1, o1);
+        for (let s = a + 12; s < b - 6; s += 30) {
+          const p = r.center.sample(s);
+          const t = r.center.tangent(s);
+          const y = r.heightAt(s) - 1.4;
+          const ang = Math.atan2(t.tz, t.tx);
+          for (const lat of r.cls === "freeway" ? [-ext * 0.62, 0, ext * 0.62] : [0]) {
+            const x = p.x - t.tz * lat;
+            const z = p.z + t.tx * lat;
+            const ground = this.terrainAt(x, z);
+            if (y - ground < 4) continue;
+            // Never on another road (padded: the column stands clear of the kerb).
+            let blocked = false;
+            for (const o of this.net.roadsAt(x, z)) if (o.road !== r) blocked = true;
+            const below = this.net.roadAt(x, z, 1.2, ground);
+            if (below && below.road !== r) blocked = true;
+            if (this.net.nodeAt(x, z)) blocked = true;
+            if (blocked) continue;
+            this.piers.push({ x, z, ang, y0: ground - 0.5, y1: y });
+            this.obbCollider(obb(x, z, 0.8, 0.8, ang), y - ground + 0.5, ground - 0.5);
+          }
+          this.pierCaps.push({ x: p.x, z: p.z, ang, half: ext * 0.85, y });
         }
       }
     }

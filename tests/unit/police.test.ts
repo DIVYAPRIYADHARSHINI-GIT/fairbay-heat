@@ -133,10 +133,58 @@ describe("police AI", () => {
     expect(r.h.totalBounty).toBeGreaterThan(0);
   });
 
-  it("units keep up with a slow getaway and bust it", () => {
+  it("toned down: a mid-range car at 150-180 km/h gets away at heats 1-3, and units never ram you head-on", () => {
+    const runs: [string, number, number, number][] = [
+      ["mustanger", 150, 1, 1],
+      ["mustanger", 150, 2, 2],
+      ["mustanger", 150, 3, 1],
+      ["carrara", 180, 3, 2],
+    ];
+    for (const [id, kmh, heat, seed] of runs) {
+      const car = placePlayer(id);
+      let maxRam = 0;
+      const r = simulate({
+        car,
+        heat,
+        secs: 240,
+        seed,
+        drive: getawayDriver(w, car, kmh / KMH, seed),
+        unitBehind: true,
+        onStep: (_t, pol) => {
+          for (const u of pol.units) {
+            // A unit coming the other way within a car length: how fast are they closing?
+            const d = Math.hypot(u.phys.x - car.x, u.phys.z - car.z);
+            if (d < 6) maxRam = Math.max(maxRam, -((u.phys.vx - car.vx) * (u.phys.x - car.x) + (u.phys.vz - car.vz) * (u.phys.z - car.z)) / (d || 1));
+          }
+        },
+      });
+      expect(r.h.state, `${id} ${kmh} km/h at heat ${heat}`).toBe("escaped");
+      // Never a full-speed head-on (used to close at 50-65 m/s).
+      expect(maxRam, `${id} ${kmh} km/h at heat ${heat}`).toBeLessThan(30);
+    }
+  });
+
+  it("units keep up with a slow getaway: it never shakes them off (they stay close), and stopping gets it busted", () => {
     const car = placePlayer("mustanger");
-    const r = simulate({ car, heat: 3, secs: 150, drive: getawayDriver(w, car, 90 / KMH, 3), unitBehind: true });
-    expect(r.h.state).toBe("busted");
+    let near = 0;
+    let n = 0;
+    const r = simulate({
+      car,
+      heat: 3,
+      secs: 120,
+      drive: getawayDriver(w, car, 90 / KMH, 3),
+      unitBehind: true,
+      onStep: (_t, pol) => {
+        n++;
+        if (pol.nearest(car.x, car.z) < 25) near++;
+      },
+    });
+    expect(r.h.state === "pursuit" || r.h.state === "busted").toBe(true);
+    expect(near / n).toBeGreaterThan(0.4);
+    // Then the getaway car stops (engine off, handbrake): the units pull up and make the bust.
+    car.vx = car.vz = 0;
+    const r2 = simulate({ car, heat: 3, secs: 45, unitBehind: true, drive: () => ({ throttle: 0, brake: 0, steer: 0, handbrake: true, nitro: false }) });
+    expect(r2.h.state).toBe("busted");
   });
 
   it("at heat 1 units tail you but do not ram; from heat 2 they PIT", () => {

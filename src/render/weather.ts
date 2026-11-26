@@ -70,6 +70,9 @@ export class Weather {
         stretch: { value: new THREE.Vector3() },
         intensity: { value: 0 },
         color: { value: new THREE.Color(0xc8d4e2) },
+        // A deck overhead (driving under a viaduct): drops stop at its
+        // underside instead of raining through the bridge. Very high = none.
+        roof: { value: 1e5 },
       },
       vertexShader: /* glsl */ `
         attribute vec4 aSeed;
@@ -78,6 +81,7 @@ export class Weather {
         uniform vec2 wind;
         uniform vec3 stretch;
         uniform float intensity;
+        uniform float roof;
         varying float vA;
         void main() {
           // Wrap the drop's x/z into the box around the camera.
@@ -92,6 +96,10 @@ export class Weather {
           p += tail * (vec3(-wind.x * 0.06, 1.1, -wind.y * 0.06) + stretch);
           // Only some drops show at light rain.
           vA = step(aSeed.w, intensity) * (0.35 + 0.45 * intensity) * smoothstep(0.0, 0.08, h) * (1.0 - tail * 0.5);
+          // Sheltered under a deck: no drops below its underside within
+          // ~14 m of the camera (the deck's width); further out it rains.
+          float under = 1.0 - step(length(p.xz - center.xz), 14.0) * step(p.y, roof);
+          vA *= under;
           gl_Position = projectionMatrix * viewMatrix * vec4(p, 1.0);
         }`,
       fragmentShader: /* glsl */ `
@@ -134,7 +142,7 @@ export class Weather {
    * @param carVel    player velocity (streak stretch)
    * @param ground    ground height for splashes
    */
-  update(dt: number, gameHours: number, cam: THREE.Camera, carVel: THREE.Vector3, time: number, ground: (x: number, z: number) => number): void {
+  update(dt: number, gameHours: number, cam: THREE.Camera, carVel: THREE.Vector3, time: number, ground: (x: number, z: number) => number, roof = Infinity): void {
     if (this.mode === "off") this.target = 0;
     else if (this.mode === "on") this.target = Math.max(this.target, 0.85);
     else {
@@ -156,6 +164,7 @@ export class Weather {
     u.time.value = time;
     u.intensity.value = this.rain;
     (u.center.value as THREE.Vector3).copy(cam.position);
+    u.roof.value = Number.isFinite(roof) ? roof : 1e5;
     // Streaks stretch against the car's motion (you drive into the rain).
     (u.stretch.value as THREE.Vector3).set(-carVel.x * 0.035, 0, -carVel.z * 0.035);
     // Splashes around the camera's ground point.
@@ -168,6 +177,8 @@ export class Weather {
         const d = 2 + this.rng() * 22;
         const x = cam.position.x + Math.cos(a) * d;
         const z = cam.position.z + Math.sin(a) * d;
+        // No splashes on the dry road under a deck.
+        if (Number.isFinite(roof) && d < 14) continue;
         this.splashPos.set([x, ground(x, z) + 0.03, z], i * 3);
         this.splashLife[i] = 0.35;
       }

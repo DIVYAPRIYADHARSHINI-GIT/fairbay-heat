@@ -6,6 +6,7 @@
  */
 
 import * as THREE from "three";
+import { releaseCanvas } from "./textures";
 import type { CarDetails, HeadlightStyle, RimStyle, TaillightStyle } from "../game/cars";
 
 const texCache = new Map<string, THREE.CanvasTexture>();
@@ -21,6 +22,7 @@ function canvasTex(key: string, w: number, h: number, draw: (g: CanvasRenderingC
   const t = new THREE.CanvasTexture(c);
   if (srgb) t.colorSpace = THREE.SRGBColorSpace;
   t.anisotropy = 8;
+  releaseCanvas(t);
   texCache.set(key, t);
   return t;
 }

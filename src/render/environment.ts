@@ -10,6 +10,7 @@
 import * as THREE from "three";
 import { Sky } from "three/examples/jsm/objects/Sky.js";
 import { clamp, lerp, smoothstep } from "../core/math";
+import { releaseCanvas } from "./textures";
 
 interface Key {
   t: number;
@@ -26,15 +27,17 @@ interface Key {
 
 // Keyframes over 24 h (wraps).
 const KEYS: Key[] = [
-  { t: 0, sun: "#8fa6e0", sunI: 0.55, hemiSky: "#4a5c92", hemiGround: "#262c3a", hemiI: 0.85, fog: "#121a2e", exposure: 1.0, turbidity: 2, rayleigh: 0.2 },
-  { t: 5.2, sun: "#8fa6e0", sunI: 0.5, hemiSky: "#4d5a8a", hemiGround: "#262a36", hemiI: 0.8, fog: "#1c2236", exposure: 0.9, turbidity: 2, rayleigh: 0.3 },
-  { t: 6.4, sun: "#ff9a5a", sunI: 0.99, hemiSky: "#c48a7a", hemiGround: "#3a2e2a", hemiI: 0.29, fog: "#d79a7e", exposure: 0.95, turbidity: 6, rayleigh: 2.6 },
+  // Night: a bright moon and a blue sky glow light the city enough to read
+  // the road, kerbs and buildings without headlights (was ~40% darker).
+  { t: 0, sun: "#9fb4e8", sunI: 0.95, hemiSky: "#5b6fa6", hemiGround: "#343c50", hemiI: 1.3, fog: "#1e2a44", exposure: 1.15, turbidity: 2, rayleigh: 0.2 },
+  { t: 5.2, sun: "#9fb4e8", sunI: 0.9, hemiSky: "#5d6b9e", hemiGround: "#343a4a", hemiI: 1.25, fog: "#262e48", exposure: 1.05, turbidity: 2, rayleigh: 0.3 },
+  { t: 6.4, sun: "#ff9a5a", sunI: 0.99, hemiSky: "#c48a7a", hemiGround: "#3a2e2a", hemiI: 0.6, fog: "#d79a7e", exposure: 0.95, turbidity: 6, rayleigh: 2.6 },
   { t: 8.5, sun: "#ffe0b8", sunI: 1.67, hemiSky: "#a9c8ec", hemiGround: "#5a5248", hemiI: 0.39, fog: "#a9c4dd", exposure: 0.85, turbidity: 2.4, rayleigh: 1.0 },
   { t: 13, sun: "#fff4e0", sunI: 1.92, hemiSky: "#a9cdf2", hemiGround: "#5e574c", hemiI: 0.41, fog: "#a6c3df", exposure: 0.8, turbidity: 2, rayleigh: 0.85 },
   { t: 17, sun: "#ffd6a0", sunI: 1.67, hemiSky: "#a8c0e0", hemiGround: "#5c5246", hemiI: 0.37, fog: "#b4bfcc", exposure: 0.85, turbidity: 2.8, rayleigh: 1.2 },
-  { t: 18.9, sun: "#ff7a3a", sunI: 1.05, hemiSky: "#b77a78", hemiGround: "#3a2a28", hemiI: 0.29, fog: "#d98b6a", exposure: 0.95, turbidity: 8, rayleigh: 3 },
-  { t: 20.1, sun: "#8f86d0", sunI: 0.5, hemiSky: "#525487", hemiGround: "#262430", hemiI: 0.8, fog: "#2a2840", exposure: 0.95, turbidity: 2, rayleigh: 0.6 },
-  { t: 24, sun: "#8fa6e0", sunI: 0.55, hemiSky: "#4a5c92", hemiGround: "#262c3a", hemiI: 0.85, fog: "#121a2e", exposure: 1.0, turbidity: 2, rayleigh: 0.2 },
+  { t: 18.9, sun: "#ff7a3a", sunI: 1.05, hemiSky: "#b77a78", hemiGround: "#3a2a28", hemiI: 0.6, fog: "#d98b6a", exposure: 0.95, turbidity: 8, rayleigh: 3 },
+  { t: 20.1, sun: "#9f96dc", sunI: 0.85, hemiSky: "#60639a", hemiGround: "#343244", hemiI: 1.25, fog: "#30304c", exposure: 1.1, turbidity: 2, rayleigh: 0.6 },
+  { t: 24, sun: "#9fb4e8", sunI: 0.95, hemiSky: "#5b6fa6", hemiGround: "#343c50", hemiI: 1.3, fog: "#1e2a44", exposure: 1.15, turbidity: 2, rayleigh: 0.2 },
 ];
 
 function sample(t: number): Key {
@@ -58,6 +61,9 @@ function sample(t: number): Key {
     rayleigh: lerp(a.rayleigh, b.rayleigh, f),
   };
 }
+
+/** Direction of the moonlight (a high-ish light from the west so night still has shape). */
+const MOON_DIR = new THREE.Vector3(-0.5, 0.75, 0.35).normalize();
 
 /** 0 at full day, 1 at full night. */
 export function nightFactor(hours: number): number {
@@ -96,11 +102,14 @@ export class Environment {
   private envSky: Sky;
   private lastEnvHours = -99;
   private sunDir = new THREE.Vector3();
+  private lightDir = new THREE.Vector3();
   private stars: THREE.Points<THREE.BufferGeometry, THREE.ShaderMaterial>;
   private moon: THREE.Sprite;
   private moonGlow: THREE.Sprite;
   private ranges: THREE.Mesh[] = [];
   private rangeMats: THREE.MeshBasicMaterial[] = [];
+  /** Night sky glow on the horizon (city light + airglow), so silhouettes read. */
+  private glow: THREE.Mesh<THREE.SphereGeometry, THREE.ShaderMaterial>;
   /** Cloud cover 0..1 (raised by rain). */
   clouds = 0.35;
 
@@ -254,6 +263,42 @@ export class Environment {
       this.rangeMats.push(mat);
       scene.add(mesh);
     }
+
+    // Night horizon glow: a dome that adds a soft band of light just above
+    // the horizon (drawn over the sky, behind everything else), fading out
+    // by ~25 degrees up. Distant buildings and the mountain ranges stand out
+    // against it as silhouettes instead of vanishing into black.
+    this.glow = new THREE.Mesh(
+      new THREE.SphereGeometry(3000, 24, 12),
+      new THREE.ShaderMaterial({
+        uniforms: { color: { value: new THREE.Color(0x2a3a5c) }, warm: { value: new THREE.Color(0x4a3c30) }, opacity: { value: 0 } },
+        vertexShader: /* glsl */ `
+          varying vec3 vDir;
+          void main() {
+            vDir = normalize(position);
+            gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+          }`,
+        fragmentShader: /* glsl */ `
+          uniform vec3 color;
+          uniform vec3 warm;
+          uniform float opacity;
+          varying vec3 vDir;
+          void main() {
+            float h = max(vDir.y, 0.0);
+            float band = (1.0 - smoothstep(0.0, 0.42, h)) * step(-0.05, vDir.y);
+            vec3 c = mix(color, warm, 1.0 - smoothstep(0.0, 0.08, h));
+            gl_FragColor = vec4(c * band * opacity, 1.0);
+          }`,
+        side: THREE.BackSide,
+        transparent: true,
+        depthWrite: false,
+        blending: THREE.AdditiveBlending,
+        fog: false,
+      }),
+    );
+    this.glow.renderOrder = -2;
+    this.glow.frustumCulled = false;
+    scene.add(this.glow);
   }
 
   /** Follows the focus point so shadows stay crisp around the player. */
@@ -287,7 +332,10 @@ export class Environment {
     this.stars.position.copy(focus);
     this.stars.visible = starsOn > 0.01;
     // Moon: opposite the sun, low in the east at dusk, high around midnight.
-    const mh = ((k.t - 18) / 13) * Math.PI; // 18:00 rise .. 07:00 set
+    // 18:00 rise .. 07:00 set. Hours wrap past midnight (00:30 is 6.5 h
+    // after moonrise, not -17.5 h - which used to flip the moon below the
+    // horizon for the second half of every night).
+    const mh = ((((k.t - 18) % 24) + 24) % 24) / 13 * Math.PI;
     const md = new THREE.Vector3(-Math.cos(mh) * 0.9, Math.sin(mh) * 0.75 + 0.05, 0.42).normalize();
     this.moon.position.copy(focus).addScaledVector(md, 3600);
     this.moonGlow.position.copy(focus).addScaledVector(md, 3700);
@@ -295,25 +343,38 @@ export class Environment {
     (this.moon.material as THREE.SpriteMaterial).opacity = moonUp;
     (this.moonGlow.material as THREE.SpriteMaterial).opacity = moonUp * 0.22;
     this.moon.visible = this.moonGlow.visible = moonUp > 0.01;
-    // Horizon ranges take the haze colour (the far one paler).
+    // Horizon ranges take the haze colour (the far one paler); at night they
+    // are dark silhouettes against the horizon glow.
     for (let i = 0; i < this.ranges.length; i++) {
       this.ranges[i].position.set(focus.x, 0, focus.z);
       const fogC = new THREE.Color(k.fog);
-      const shade = i === 0 ? 0.86 : 0.7;
-      this.rangeMats[i].color.copy(fogC).multiplyScalar(shade).lerp(new THREE.Color(k.hemiGround), 0.18 * (i + 1));
+      const shade = (i === 0 ? 0.86 : 0.7) * (1 - 0.45 * this.night);
+      this.rangeMats[i].color.copy(fogC).multiplyScalar(shade).lerp(new THREE.Color(k.hemiGround), 0.18 * (i + 1) * (1 - this.night));
     }
+    this.glow.position.copy(focus);
+    const glowOn = this.night * (1 - 0.5 * clamp((this.clouds - 0.35) / 0.6, 0, 1));
+    this.glow.material.uniforms.opacity.value = glowOn;
+    this.glow.visible = glowOn > 0.01;
 
     const storm = clamp((this.clouds - 0.35) / 0.6, 0, 1);
     this.sun.color.set(k.sun);
     this.sun.intensity = k.sunI * (1 - 0.65 * storm);
-    this.sun.position.copy(focus).addScaledVector(this.sunDir, 300);
+    // Moonlight casts faint, soft shadows (the sky glow fills them in); full
+    // sun casts deep ones. At night a street between tall buildings is in
+    // moon shadow, and full-strength shadows left it pitch black.
+    this.sun.shadow.intensity = lerp(1, 0.35, this.night) * (1 - 0.5 * storm);
+    // The light: the sun by day, the moon by night, blended across twilight
+    // so a low dawn/dusk sun never rakes the city at a grazing angle while
+    // it is still dark (that left streets nearly black around 6:00).
+    this.lightDir.copy(this.sunDir).lerp(MOON_DIR, this.night).normalize();
+    this.sun.position.copy(focus).addScaledVector(this.lightDir, 300);
     this.sun.target.position.copy(focus);
     // Snap the shadow camera to texels to stop shimmering while driving.
     if (this.sun.castShadow) {
       const texel = 140 / this.sun.shadow.mapSize.x;
       this.sun.target.position.x = Math.round(focus.x / texel) * texel;
       this.sun.target.position.z = Math.round(focus.z / texel) * texel;
-      this.sun.position.copy(this.sun.target.position).addScaledVector(this.sunDir, 300);
+      this.sun.position.copy(this.sun.target.position).addScaledVector(this.lightDir, 300);
     }
     this.hemi.color.set(k.hemiSky).lerp(new THREE.Color("#8a929c"), storm * 0.6);
     this.hemi.groundColor.set(k.hemiGround);
@@ -409,7 +470,7 @@ function moonTexture(): THREE.CanvasTexture {
   }
   const t = new THREE.CanvasTexture(c);
   t.colorSpace = THREE.SRGBColorSpace;
-  return t;
+  return releaseCanvas(t);
 }
 
 function glowTexture(): THREE.CanvasTexture {
@@ -422,5 +483,5 @@ function glowTexture(): THREE.CanvasTexture {
   grad.addColorStop(1, "rgba(255,255,255,0)");
   g.fillStyle = grad;
   g.fillRect(0, 0, 128, 128);
-  return new THREE.CanvasTexture(c);
+  return releaseCanvas(new THREE.CanvasTexture(c));
 }

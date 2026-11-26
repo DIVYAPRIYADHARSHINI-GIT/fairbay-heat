@@ -25,7 +25,7 @@ import { Polyline } from "../core/geom";
 import { CarPhysics, KMH, type Controls, type World } from "./physics";
 import type { CarDef } from "./cars";
 import type { Road, RoadNetwork } from "./roads";
-import { resolveCars } from "./contact";
+import { crashKick, resolveCars, slideOff } from "./contact";
 import type { Traffic } from "./traffic";
 
 // ---- event catalogue ----------------------------------------------------------
@@ -475,20 +475,14 @@ export class Race {
       for (const r of this.racers) {
         if (!r.phys) continue;
         const c = r.phys;
-        const tev = traffic.collide({ x: c.x, z: c.z, vx: c.vx, vz: c.vz, heading: c.heading, radius: c.radius, length: c.def.body.length, width: c.def.body.width });
-        for (const rb of tev.rubs) {
-          c.x += rb.nx * rb.depth;
-          c.z += rb.nz * rb.depth;
-          const vn = c.vx * rb.nx + c.vz * rb.nz;
-          if (vn < 0) {
-            c.vx -= vn * rb.nx;
-            c.vz -= vn * rb.nz;
-          }
-        }
+        const tev = traffic.collide({ x: c.x, y: c.y, z: c.z, vx: c.vx, vz: c.vz, heading: c.heading, radius: c.radius, length: c.def.body.length, width: c.def.body.width });
+        for (const rb of tev.rubs) slideOff(c, { ...rb, vx: Math.sin(rb.car.heading) * rb.car.v, vz: Math.cos(rb.car.heading) * rb.car.v });
+        for (const bp of tev.bumps) slideOff(c, bp);
         for (const hit of tev.hits) {
-          const k = 1 - 0.25 * clamp(hit.impact / 25, 0, 1);
-          c.vx *= k;
-          c.vz *= k;
+          c.x += hit.nx * hit.depth;
+          c.z += hit.nz * hit.depth;
+          const vn = c.vx * hit.nx + c.vz * hit.nz;
+          if (vn < 0) crashKick(c, hit.nx, hit.nz, Math.min(hit.impact, -vn), hit.share);
         }
       }
     }

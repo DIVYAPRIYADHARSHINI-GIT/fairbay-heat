@@ -9,6 +9,7 @@
  */
 
 import * as THREE from "three";
+import { releaseCanvas } from "./textures";
 import { mergeGeometries } from "three/examples/jsm/utils/BufferGeometryUtils.js";
 import type { BodySpec, CarDef } from "../game/cars";
 import { clamp, lerp, smoothstep } from "../core/math";
@@ -107,7 +108,7 @@ function rimTexture(): THREE.CanvasTexture {
   const t = new THREE.CanvasTexture(c);
   t.colorSpace = THREE.SRGBColorSpace;
   t.anisotropy = 8;
-  return t;
+  return releaseCanvas(t);
 }
 
 function shadowTexture(): THREE.CanvasTexture {
@@ -122,7 +123,7 @@ function shadowTexture(): THREE.CanvasTexture {
   g.setTransform(1, 0, 0, 2, 0, -64);
   g.fillStyle = grad;
   g.fillRect(0, 0, 64, 128);
-  return new THREE.CanvasTexture(c);
+  return releaseCanvas(new THREE.CanvasTexture(c));
 }
 
 function materials() {
@@ -183,7 +184,7 @@ function policeDoorTex(): THREE.CanvasTexture {
   const t = new THREE.CanvasTexture(c);
   t.colorSpace = THREE.SRGBColorSpace;
   t.anisotropy = 8;
-  return t;
+  return releaseCanvas(t);
 }
 
 // ---- body profile functions ----------------------------------------------------

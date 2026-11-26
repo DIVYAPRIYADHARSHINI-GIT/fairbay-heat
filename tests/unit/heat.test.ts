@@ -41,9 +41,12 @@ describe("heat / wanted system", () => {
     const h = new HeatSystem();
     h.offence("speeding", true); // 300 at heat 1
     // Taking out police cars: 300 + 5000 (heat 1) = 5300, still heat 1;
-    // + 5000 more = 10300 > 6000 -> heat 2; + 10000 (x2) = 20300 > 18000 -> heat 3.
+    // + 5000 more = 10300 > 8000 -> heat 2; + 10000 (x2) = 20300, still 2;
+    // + 10000 more = 30300 > 24000 -> heat 3.
     h.offence("takedown", true);
     expect(h.heat).toBe(1);
+    h.offence("takedown", true);
+    expect(h.heat).toBe(2);
     h.offence("takedown", true);
     expect(h.heat).toBe(2);
     h.offence("takedown", true);
@@ -51,7 +54,7 @@ describe("heat / wanted system", () => {
     expect(h.heat).toBe(3);
     const slow = new HeatSystem();
     slow.offence("property", true);
-    const ev = run(slow, 50, true);
+    const ev = run(slow, 65, true);
     expect(slow.heat).toBe(2);
     expect(ev.some((e) => e.type === "heat-up" && e.heat === 2)).toBe(true);
   });
@@ -131,12 +134,28 @@ describe("heat / wanted system", () => {
   it("boxed in by units, even crawling along gets you busted", () => {
     const h = new HeatSystem();
     h.offence("speeding", true);
-    run(h, DEFAULT_HEAT_CONFIG.bustTime + 0.3, true, 5, 5, true);
+    run(h, DEFAULT_HEAT_CONFIG.bustTime + 0.3, true, 5, 3.5, true);
     expect(h.state).toBe("busted");
     const free = new HeatSystem();
     free.offence("speeding", true);
-    run(free, DEFAULT_HEAT_CONFIG.bustTime + 0.3, true, 5, 5, false);
+    run(free, DEFAULT_HEAT_CONFIG.bustTime + 0.3, true, 5, 3.5, false);
     expect(free.state).toBe("pursuit");
+  });
+
+  it("the police are forgiving: busting takes over 4 s stopped, and a few seconds out of sight starts the cooldown", () => {
+    expect(DEFAULT_HEAT_CONFIG.bustTime).toBeGreaterThanOrEqual(4);
+    expect(DEFAULT_HEAT_CONFIG.loseSight).toBeLessThanOrEqual(4);
+    // Rolling at a walking pace (3 m/s, not boxed in) never gets you busted.
+    const h = new HeatSystem();
+    h.offence("speeding", true);
+    run(h, 20, true, 4, 3, false);
+    expect(h.state).toBe("pursuit");
+    expect(h.bust).toBe(0);
+    // A heat-1 escape takes under 15 s of hiding.
+    const e = new HeatSystem();
+    e.offence("speeding", true);
+    const ev = run(e, DEFAULT_HEAT_CONFIG.loseSight + 15, false, 250);
+    expect(ev.some((x) => x.type === "escaped")).toBe(true);
   });
 
   it("more heat brings more units, faster cars and roadblocks", () => {
@@ -145,7 +164,8 @@ describe("heat / wanted system", () => {
       expect(enforcerShare(k + 1)).toBeGreaterThanOrEqual(enforcerShare(k));
     }
     expect(unitsForHeat(5)).toBeGreaterThan(unitsForHeat(1) * 2);
-    expect(roadblocksAt(2)).toBe(false);
-    expect(roadblocksAt(3)).toBe(true);
+    expect(unitsForHeat(1)).toBe(1);
+    expect(roadblocksAt(3)).toBe(false);
+    expect(roadblocksAt(4)).toBe(true);
   });
 });

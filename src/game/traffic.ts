@@ -16,9 +16,11 @@
  *  - Junction reservation: a car commits to a connector only when no car is
  *    already on a conflicting connector and (if it yields) no priority car
  *    is about to arrive. This is what stops cars driving through each other.
- *  - Collisions with the player: traffic cars are solid circles for the
- *    player physics; when hit they get knocked away, spin and stop
- *    ("wrecked") for a few seconds, then recover - and the drivers honk.
+ *  - Collisions with the player (oriented boxes, see contact.ts): a light
+ *    brush is a rub (the car keeps its lane), a firmer tap is a bump (the
+ *    car is shoved along its lane and drives on), and only a real crash
+ *    knocks it out of its lane ("wrecked") for a few seconds - and the
+ *    driver honks. Momentum is shared by mass, so the player ploughs on.
  *  - Spawning/despawning in a ring around the player (60-300 m), never in
  *    view range right in front of the camera, keeps ~50 cars alive in a
  *    24 km road network at negligible cost.
@@ -29,7 +31,7 @@
 import { clamp, mulberry32 } from "../core/math";
 import { signalState, type LaneSeg, type RoadNetwork, type RNode } from "./roads";
 import type { CircleCollider } from "./collision";
-import { RUB_SPEED, boxContact, footprint } from "./contact";
+import { CRASH_BOUNCE, CRASH_SPEED, PLAYER_MASS, RUB_SPEED, boxContact, footprint } from "./contact";
 
 // ---- IDM parameters --------------------------------------------------------
 
@@ -79,16 +81,18 @@ export interface TrafficModel {
   height: number;
   colors: string[];
   weight: number;
+  /** Mass relative to a mid-size sedan (sharing out collisions). */
+  mass: number;
 }
 
 export const TRAFFIC_MODELS: TrafficModel[] = [
-  { kind: "sedan", length: 4.7, width: 1.85, height: 1.45, colors: ["#c9ccd1", "#2b2f36", "#7a1f25", "#1f3a5f", "#e8e8e8", "#5b6168"], weight: 5 },
-  { kind: "hatch", length: 4.1, width: 1.78, height: 1.48, colors: ["#d2483d", "#e0c341", "#3d7ab8", "#f2f2f2", "#3b4a3f", "#8c3b8f"], weight: 4 },
-  { kind: "suv", length: 4.85, width: 1.95, height: 1.75, colors: ["#1e2226", "#9aa1a8", "#48525c", "#efefef", "#5a3b2a"], weight: 3 },
-  { kind: "taxi", length: 4.75, width: 1.85, height: 1.5, colors: ["#f2c230"], weight: 1.4 },
-  { kind: "van", length: 5.3, width: 2.0, height: 2.2, colors: ["#f4f4f4", "#d9d9d9", "#2f5d8a"], weight: 1.2 },
-  { kind: "pickup", length: 5.4, width: 2.0, height: 1.85, colors: ["#8b1e1e", "#2e4a2e", "#c4c4c4", "#1c1c1c"], weight: 1.3 },
-  { kind: "bus", length: 11.5, width: 2.55, height: 3.1, colors: ["#d8392b"], weight: 0.4 },
+  { kind: "sedan", length: 4.7, width: 1.85, height: 1.45, colors: ["#c9ccd1", "#2b2f36", "#7a1f25", "#1f3a5f", "#e8e8e8", "#5b6168"], weight: 5, mass: 1 },
+  { kind: "hatch", length: 4.1, width: 1.78, height: 1.48, colors: ["#d2483d", "#e0c341", "#3d7ab8", "#f2f2f2", "#3b4a3f", "#8c3b8f"], weight: 4, mass: 0.85 },
+  { kind: "suv", length: 4.85, width: 1.95, height: 1.75, colors: ["#1e2226", "#9aa1a8", "#48525c", "#efefef", "#5a3b2a"], weight: 3, mass: 1.3 },
+  { kind: "taxi", length: 4.75, width: 1.85, height: 1.5, colors: ["#f2c230"], weight: 1.4, mass: 1 },
+  { kind: "van", length: 5.3, width: 2.0, height: 2.2, colors: ["#f4f4f4", "#d9d9d9", "#2f5d8a"], weight: 1.2, mass: 1.6 },
+  { kind: "pickup", length: 5.4, width: 2.0, height: 1.85, colors: ["#8b1e1e", "#2e4a2e", "#c4c4c4", "#1c1c1c"], weight: 1.3, mass: 1.5 },
+  { kind: "bus", length: 11.5, width: 2.55, height: 3.1, colors: ["#d8392b"], weight: 0.4, mass: 6 },
 ];
 
 /**
@@ -97,7 +101,7 @@ export const TRAFFIC_MODELS: TrafficModel[] = [
  * the car over and chases you. Never picked at random (not in TRAFFIC_MODELS);
  * drawn by the police renderer, not the traffic one.
  */
-export const POLICE_MODEL: TrafficModel = { kind: "police", length: 5.0, width: 1.92, height: 1.46, colors: ["#101318"], weight: 0 };
+export const POLICE_MODEL: TrafficModel = { kind: "police", length: 5.0, width: 1.92, height: 1.46, colors: ["#101318"], weight: 0, mass: 1.3 };
 
 export interface TrafficCar {
   id: number;
@@ -147,11 +151,30 @@ export interface PlayerState {
   length: number;
   /** Body width (m); defaults to about twice the radius. */
   width?: number;
+  /**
+   * Height of the car (m). Cars on different levels (one on a viaduct, one
+   * on the street underneath) never touch, block or near-miss each other.
+   */
+  y?: number;
 }
 
+/** Two cars this far apart vertically are on different levels (deck vs street). */
+export const LEVEL_GAP = 2.5;
+
 export interface TrafficEvents {
-  /** Cars the player just crashed into: impact (closing) speed and contact point. */
-  hits: { car: TrafficCar; impact: number; x: number; z: number }[];
+  /**
+   * Cars the player just crashed into: impact (closing) speed, contact point,
+   * the normal from the traffic car to the player, the overlap to push out
+   * by, and `share` - the part of the closing speed the player's car takes
+   * (by mass: a sedan barely slows you, a bus stops you).
+   */
+  hits: { car: TrafficCar; impact: number; x: number; z: number; nx: number; nz: number; depth: number; share: number }[];
+  /**
+   * Firmer taps (RUB_SPEED..CRASH_SPEED): the traffic car is shoved along
+   * its lane and drives on; the player loses only its mass share of the
+   * closing speed. `vx/vz` is the traffic car's velocity after the shove.
+   */
+  bumps: { car: TrafficCar; impact: number; x: number; z: number; nx: number; nz: number; depth: number; vx: number; vz: number }[];
   /**
    * Cars the player is brushing past (closing slower than RUB_SPEED): the
    * normal points from the traffic car to the player, `depth` is the overlap
@@ -517,6 +540,7 @@ export class Traffic {
     const ahead = dx * fx + dz * fz;
     const side = Math.abs(-dx * fz + dz * fx);
     if (ahead < 0 || ahead > 60 || side > (car.model.width + p.radius * 2) / 2 + 0.6) return { gap: Infinity, v: 0 };
+    if (p.y !== undefined && Math.abs(p.y - car.y) > LEVEL_GAP) return { gap: Infinity, v: 0 };
     const pv = p.vx * fx + p.vz * fz;
     return { gap: ahead - car.model.length / 2 - p.length / 2, v: pv };
   }
@@ -538,7 +562,7 @@ export class Traffic {
   }
 
   step(dt: number, player: PlayerState | null, focusX: number, focusZ: number, focusHeading: number | null): TrafficEvents {
-    const ev: TrafficEvents = { hits: [], rubs: [], horns: [] };
+    const ev: TrafficEvents = { hits: [], bumps: [], rubs: [], horns: [] };
     this.time += dt;
     if (!this.enabled) return ev;
 
@@ -706,7 +730,7 @@ export class Traffic {
    * the game, so a fast car cannot pass through a traffic car between frames.
    */
   collide(p: PlayerState): TrafficEvents {
-    const ev: TrafficEvents = { hits: [], rubs: [], horns: [] };
+    const ev: TrafficEvents = { hits: [], bumps: [], rubs: [], horns: [] };
     if (this.enabled) this.collidePlayer(p, ev);
     return ev;
   }
@@ -717,6 +741,7 @@ export class Traffic {
       const dz = car.z - p.z;
       const reach = car.model.length / 2 + p.length / 2 + 0.5;
       if (dx * dx + dz * dz > reach * reach) continue;
+      if (p.y !== undefined && Math.abs(p.y - car.y) > LEVEL_GAP) continue; // other level
       // Precise test: car circles vs player circles.
       const hit = this.circleHit(car, p);
       if (!hit) continue;
@@ -734,18 +759,36 @@ export class Traffic {
         continue;
       }
       if (impact < 1.2 && car.wrecked > 0) continue;
-      // A CRASH: knock the traffic car away (the player car is much heavier in arcade terms).
+      // Momentum is shared by mass (the player's hero car is heavier than
+      // most traffic): `mine` is the share of the closing speed the traffic
+      // car takes, the rest is the player's.
+      const mine = PLAYER_MASS / (PLAYER_MASS + car.model.mass);
+      if (car.wrecked <= 0 && impact < CRASH_SPEED) {
+        // A BUMP: shove the car along its lane (a nudge from behind speeds
+        // it up, a tap on the nose slows it) - it keeps driving, no crash.
+        const fx = Math.sin(car.heading);
+        const fz = Math.cos(car.heading);
+        const along = hit.nx * fx + hit.nz * fz;
+        car.v = clamp(car.v + impact * mine * along, 0, Math.max(car.v, car.seg.speed * 1.6));
+        ev.bumps.push({ car, impact, x: hit.cx, z: hit.cz, nx: -hit.nx, nz: -hit.nz, depth: hit.depth, vx: fx * car.v, vz: fz * car.v });
+        if (car.hornT === 0) {
+          car.hornT = 5;
+          ev.horns.push({ car, long: false });
+        }
+        continue;
+      }
+      // A CRASH: the traffic car is knocked out of its lane.
       if (car.wrecked <= 0) {
-        car.wrecked = 6;
+        car.wrecked = 4.5;
         car.wvx = cvx;
         car.wvz = cvz;
         car.wyaw = 0;
       }
-      const push = Math.max(impact, 2) * 0.9;
-      car.wvx += hit.nx * push + p.vx * 0.25;
-      car.wvz += hit.nz * push + p.vz * 0.25;
+      const push = Math.max(impact, 2) * mine * (1 + CRASH_BOUNCE);
+      car.wvx += hit.nx * push + p.vx * 0.1;
+      car.wvz += hit.nz * push + p.vz * 0.1;
       car.wyaw += (this.rng() - 0.5) * impact * 0.35;
-      ev.hits.push({ car, impact, x: hit.cx, z: hit.cz });
+      ev.hits.push({ car, impact, x: hit.cx, z: hit.cz, nx: -hit.nx, nz: -hit.nz, depth: hit.depth, share: 1 - mine });
       if (car.hornT === 0) {
         car.hornT = 8;
         ev.horns.push({ car, long: true });

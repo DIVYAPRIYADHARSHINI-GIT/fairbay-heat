@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { CarPhysics } from "../../src/game/physics";
 import { carById } from "../../src/game/cars";
-import { RUB_SPEED, resolveCars } from "../../src/game/contact";
+import { CRASH_SPEED, RUB_SPEED, resolveCars } from "../../src/game/contact";
 import { Traffic } from "../../src/game/traffic";
 import { World } from "../../src/game/world";
 
@@ -33,13 +33,31 @@ describe("car-to-car contact: rubs vs crashes", () => {
     expect(sep).toBeLessThan(0.05);
   });
 
-  it("a rear-ending at 30 km/h closing speed is a crash (with a little bounce)", () => {
+  it("a rear-ending at 30 km/h closing speed is a bump: a shove, no bounce, nobody stops dead", () => {
     const a = car("gtarr", 0, 0, 0, 25);
     const b = car("mustanger", 0, 4.4, 0, 16.7);
     const r = resolveCars(a, b)!;
+    expect(r.rel).toBeGreaterThan(RUB_SPEED);
+    expect(r.crash).toBe(false);
+    expect(r.bump).toBe(true);
+    // Perfectly inelastic: they end up moving together (no recoil)...
+    const sep = (b.vx - a.vx) * r.hit.nx + (b.vz - a.vz) * r.hit.nz;
+    expect(Math.abs(sep)).toBeLessThan(0.05);
+    // ...at about their average speed: the one behind keeps going.
+    expect(a.speed).toBeGreaterThan(19);
+    expect(b.speed).toBeGreaterThan(19);
+  });
+
+  it("a rear-ending at 70 km/h closing speed is a crash (a small bounce, then both still rolling)", () => {
+    const a = car("gtarr", 0, 0, 0, 30);
+    const b = car("mustanger", 0, 4.4, 0, 10);
+    const r = resolveCars(a, b)!;
+    expect(r.rel).toBeGreaterThan(CRASH_SPEED);
     expect(r.crash).toBe(true);
     const sep = (b.vx - a.vx) * r.hit.nx + (b.vz - a.vz) * r.hit.nz;
     expect(sep).toBeGreaterThan(0.5);
+    expect(sep).toBeLessThan(0.2 * r.rel);
+    expect(a.vz).toBeGreaterThan(5);
   });
 
   it("brushing a traffic car is a rub (it stays in its lane); hitting one squarely knocks it out", () => {
@@ -64,5 +82,32 @@ describe("car-to-car contact: rubs vs crashes", () => {
     const ev2 = tr.collide(p2);
     expect(ev2.hits.length).toBe(1);
     expect(t.wrecked).toBeGreaterThan(0);
+    // The hero car takes only its mass share of the closing speed (~30% vs a sedan).
+    expect(ev2.hits[0].share).toBeGreaterThan(0.2);
+    expect(ev2.hits[0].share).toBeLessThan(0.4);
+  });
+
+  it("tapping a traffic car from behind at 25 km/h closing is a bump: it is shoved along its lane and drives on", () => {
+    const w = new World({ bare: true });
+    const tr = new Traffic(w.net, 3, w.ground);
+    tr.target = 0;
+    const lane = w.net.road("kings-2").lanesFwd[0];
+    const t = tr.add(lane, 60);
+    t.v = 8;
+    tr.step(1 / 30, null, t.x, t.z, null);
+    const h = t.heading;
+    const fx = Math.sin(h);
+    const fz = Math.cos(h);
+    const p = { x: t.x - fx * 4.5, z: t.z - fz * 4.5, vx: fx * 15, vz: fz * 15, heading: h, radius: 0.9, length: 4.6, width: 1.88 };
+    const ev = tr.collide(p);
+    expect(ev.hits.length).toBe(0);
+    expect(ev.bumps.length).toBe(1);
+    expect(t.wrecked).toBe(0);
+    // Shoved forward (faster than before), still in its lane.
+    expect(t.v).toBeGreaterThan(9);
+    // Keeps driving afterwards.
+    for (let k = 0; k < 30; k++) tr.step(1 / 30, null, t.x, t.z, null);
+    expect(t.wrecked).toBe(0);
+    expect(t.v).toBeGreaterThan(3);
   });
 });

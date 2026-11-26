@@ -437,7 +437,10 @@ export class CarPhysics {
               ev.impactX = cx - hit.nx * this.radius;
               ev.impactZ = cz - hit.nz * this.radius;
             }
-            const restitution = 0.22;
+            // Only real hits bounce back; a scrape or a tap just stops the
+            // part of the motion that goes into the wall (no recoil), so you
+            // slide along it and keep going.
+            const restitution = impact < 4 ? 0 : impact < 10 ? 0.08 : 0.18;
             this.vx -= (1 + restitution) * vn * hit.nx;
             this.vz -= (1 + restitution) * vn * hit.nz;
             stepImpact = Math.max(stepImpact, impact);
@@ -460,8 +463,10 @@ export class CarPhysics {
       }
     }
     if (stepImpact > 0) {
-      // Scrape friction along the wall, applied once per step.
-      const scrape = clamp(1 - stepImpact * 0.015, 0.65, 0.985);
+      // Scrape friction along the wall, applied once per step: almost
+      // nothing for a brush, a little for a real hit (a glancing hit keeps
+      // most of its speed; a head-on hit already lost it to the wall).
+      const scrape = stepImpact < 4 ? 0.995 : clamp(1 - (stepImpact - 4) * 0.012, 0.75, 0.985);
       this.vx *= scrape;
       this.vz *= scrape;
     }

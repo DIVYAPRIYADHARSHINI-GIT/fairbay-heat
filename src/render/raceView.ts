@@ -17,6 +17,7 @@ import * as THREE from "three";
 import type { CameraDef, Gate, RaceDef, Route } from "../game/race";
 import type { CarDef } from "../game/cars";
 import { buildCar, mergeCarBody, poseCar, type CarVisual } from "./carModel";
+import { releaseCanvas } from "./textures";
 
 function chequer(): THREE.CanvasTexture {
   const c = document.createElement("canvas");
@@ -30,7 +31,7 @@ function chequer(): THREE.CanvasTexture {
   const t = new THREE.CanvasTexture(c);
   t.colorSpace = THREE.SRGBColorSpace;
   t.wrapS = THREE.RepeatWrapping;
-  return t;
+  return releaseCanvas(t);
 }
 
 function banner(text: string, color: string): THREE.CanvasTexture {
@@ -49,7 +50,7 @@ function banner(text: string, color: string): THREE.CanvasTexture {
   g.fillText(text, 256, 44);
   const t = new THREE.CanvasTexture(c);
   t.colorSpace = THREE.SRGBColorSpace;
-  return t;
+  return releaseCanvas(t);
 }
 
 /** A gate across the road: two pylons and a banner. */

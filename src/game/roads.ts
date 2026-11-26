@@ -705,8 +705,11 @@ export class RoadNetwork {
       let score = p.dist / (r.hw + extra);
       if (y !== undefined) {
         const h = r.heightAt(p.s);
-        // Surfaces more than 1.5 m above us are out of reach (we are under them).
-        score = h > y + 1.5 ? 1e6 + h : Math.abs(y - h) * 10 + score;
+        // A surface more than 1.5 m above us is a deck we are UNDER: it is
+        // never "the road here", even when it is the only one (a car on the
+        // verge beneath a viaduct is on the ground, not up on the highway).
+        if (h > y + 1.5) continue;
+        score = Math.abs(y - h) * 10 + score;
       }
       if (score < bestScore) {
         bestScore = score;
