@@ -34,6 +34,9 @@ import type { RNode, Road, RoadNetwork } from "./roads";
 import type { Collider, SpatialHash } from "./collision";
 import { POLICE_MODEL, type PlayerState, type Traffic, type TrafficCar } from "./traffic";
 import { enforcerShare, roadblocksAt, unitsForHeat, type HeatState } from "./heat";
+import { carContact, resolveCars } from "./contact";
+
+export { carContact };
 
 // ---- the two police cars ----------------------------------------------------
 
@@ -887,40 +890,22 @@ export class Police {
     const pc = p.car;
     for (const u of this.units) {
       const c = u.phys;
-      const hit = carContact(pc, c);
-      if (!hit) continue;
       const parked = u.mode === "roadblock";
-      // Separate (a parked roadblock car barely moves: it has its brakes on).
-      const share = parked ? 0.85 : 0.5;
-      pc.x -= hit.nx * hit.depth * share;
-      pc.z -= hit.nz * hit.depth * share;
-      c.x += hit.nx * hit.depth * (1 - share);
-      c.z += hit.nz * hit.depth * (1 - share);
-      const rel = (pc.vx - c.vx) * hit.nx + (pc.vz - c.vz) * hit.nz;
-      if (rel <= 0) continue;
-      // Momentum exchange along the normal (similar masses; a parked car is
-      // effectively heavier because its wheels are locked).
-      const restitution = 0.25;
-      const mp = parked ? 0.72 : 0.5;
-      const j = (1 + restitution) * rel;
-      pc.vx -= hit.nx * j * mp;
-      pc.vz -= hit.nz * j * mp;
-      c.vx += hit.nx * j * (1 - mp);
-      c.vz += hit.nz * j * (1 - mp);
-      // An off-centre shove spins both cars a little (that is what a PIT does).
-      const tx = -hit.nz;
-      const tz = hit.nx;
-      const lever = (hit.x - c.x) * tx + (hit.z - c.z) * tz;
-      c.yawRate += clamp(lever * rel * 0.12, -3, 3);
-      const plever = (hit.x - pc.x) * tx + (hit.z - pc.z) * tz;
-      pc.yawRate -= clamp(plever * rel * 0.08, -2, 2);
+      // A parked roadblock car barely moves (wheels locked): it takes 15% of the push.
+      const res = resolveCars(pc, c, parked ? 0.85 : 0.5, parked ? 0.15 : 0.5);
+      if (!res) continue;
+      const { hit, rel } = res;
+      // Rubs (side by side, brushing past) are not rams: no sparks, no
+      // damage, no offence. A PIT is a deliberate push from the side, so
+      // units count as ramming at a lower closing speed than you do.
       if (rel > 2.5 && u.hitCool === 0) {
-        u.hitCool = 0.5;
-        ev.rams.push({ unit: u, impact: rel, x: hit.x, z: hit.z });
         // Who drove into whom: the player is ramming if they were moving into the cop.
         const into = pc.vx * hit.nx + pc.vz * hit.nz;
         const copInto = -(c.vx * hit.nx + c.vz * hit.nz);
-        const playerRam = into > copInto && into > 5 && u.mode !== "wrecked";
+        const playerRam = res.crash && into > copInto && into > 5 && u.mode !== "wrecked";
+        if (!res.crash && !(copInto > into)) continue; // a light brush from the player
+        u.hitCool = 0.5;
+        ev.rams.push({ unit: u, impact: rel, x: hit.x, z: hit.z });
         if (playerRam) ev.witnessed.push("rammed-cop");
         if (u.mode !== "wrecked") {
           // A unit's own PIT nudges barely hurt it; your hits do.
@@ -939,7 +924,16 @@ export class Police {
     for (const u of this.units) {
       if (u.mode === "roadblock") continue;
       const c = u.phys;
-      const tev = this.traffic.collide({ x: c.x, z: c.z, vx: c.vx, vz: c.vz, heading: c.heading, radius: c.radius, length: c.def.body.length });
+      const tev = this.traffic.collide({ x: c.x, z: c.z, vx: c.vx, vz: c.vz, heading: c.heading, radius: c.radius, length: c.def.body.length, width: c.def.body.width });
+      for (const r of tev.rubs) {
+        c.x += r.nx * r.depth;
+        c.z += r.nz * r.depth;
+        const vn = c.vx * r.nx + c.vz * r.nz;
+        if (vn < 0) {
+          c.vx -= vn * r.nx;
+          c.vz -= vn * r.nz;
+        }
+      }
       for (const h of tev.hits) {
         const k = 1 - 0.18 * clamp(h.impact / 25, 0, 1);
         c.vx *= k;
@@ -952,22 +946,7 @@ export class Police {
       for (let k = i + 1; k < this.units.length; k++) {
         const a = this.units[i];
         const b = this.units[k];
-        const hit = carContact(a.phys, b.phys);
-        if (!hit) continue;
-        const wa = a.mode === "roadblock" ? 0 : 0.5;
-        const wb = b.mode === "roadblock" ? 0 : 0.5;
-        const sum = wa + wb || 1;
-        a.phys.x -= (hit.nx * hit.depth * wa) / sum;
-        a.phys.z -= (hit.nz * hit.depth * wa) / sum;
-        b.phys.x += (hit.nx * hit.depth * wb) / sum;
-        b.phys.z += (hit.nz * hit.depth * wb) / sum;
-        const rel = (a.phys.vx - b.phys.vx) * hit.nx + (a.phys.vz - b.phys.vz) * hit.nz;
-        if (rel > 0) {
-          a.phys.vx -= hit.nx * rel * wa;
-          a.phys.vz -= hit.nz * rel * wa;
-          b.phys.vx += hit.nx * rel * wb;
-          b.phys.vz += hit.nz * rel * wb;
-        }
+        resolveCars(a.phys, b.phys, a.mode === "roadblock" ? 0 : 0.5, b.mode === "roadblock" ? 0 : 0.5);
       }
     }
     return ev;
@@ -975,7 +954,7 @@ export class Police {
 
   /** Traffic treats units like the player's car: it brakes for them instead of driving through. */
   trafficObstacles(): PlayerState[] {
-    return this.units.map((u) => ({ x: u.phys.x, z: u.phys.z, vx: u.phys.vx, vz: u.phys.vz, heading: u.phys.heading, radius: u.phys.radius, length: u.phys.def.body.length }));
+    return this.units.map((u) => ({ x: u.phys.x, z: u.phys.z, vx: u.phys.vx, vz: u.phys.vz, heading: u.phys.heading, radius: u.phys.radius, length: u.phys.def.body.length, width: u.phys.def.body.width }));
   }
 
   /**
@@ -1069,31 +1048,4 @@ function obbCorners(b: { cx: number; cz: number; hx: number; hz: number; c: numb
     [b.cx - ux - vx, b.cz - uz - vz],
     [b.cx + ux - vx, b.cz + uz - vz],
   ];
-}
-
-/** Contact between two cars (3 circles each). Normal points from a to b; (x, z) is the contact point. */
-export function carContact(a: CarPhysics, b: CarPhysics): { nx: number; nz: number; depth: number; x: number; z: number } | null {
-  const dx0 = b.x - a.x;
-  const dz0 = b.z - a.z;
-  const reach = (a.def.body.length + b.def.body.length) / 2 + 0.5;
-  if (dx0 * dx0 + dz0 * dz0 > reach * reach || Math.abs(a.y - b.y) > 2.5) return null;
-  let best: { nx: number; nz: number; depth: number; x: number; z: number } | null = null;
-  for (const oa of a.circleOffsets) {
-    const ax = a.x + a.forwardX * oa;
-    const az = a.z + a.forwardZ * oa;
-    for (const ob of b.circleOffsets) {
-      const bx = b.x + b.forwardX * ob;
-      const bz = b.z + b.forwardZ * ob;
-      const dx = bx - ax;
-      const dz = bz - az;
-      const d = Math.hypot(dx, dz);
-      const depth = a.radius + b.radius - d;
-      if (depth > 0 && (!best || depth > best.depth)) {
-        const nx = d > 1e-6 ? dx / d : 1;
-        const nz = d > 1e-6 ? dz / d : 0;
-        best = { nx, nz, depth, x: ax + nx * a.radius, z: az + nz * a.radius };
-      }
-    }
-  }
-  return best;
 }

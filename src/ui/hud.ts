@@ -48,6 +48,41 @@ export interface PursuitHud {
   red: boolean;
 }
 
+/** What the HUD shows during a race. */
+export interface RaceHud {
+  name: string;
+  position: number;
+  racers: number;
+  lap: number;
+  laps: number;
+  time: number;
+  best: number;
+  /** Next checkpoint (for the arrow and the minimap). */
+  gx: number;
+  gz: number;
+  gate: number;
+  gates: number;
+  wrongWay: boolean;
+  /** Rival positions for the minimap. */
+  rivals: { x: number; z: number }[];
+  route: { x: number; z: number }[];
+}
+
+/** A point of interest on the minimap / full map. */
+export interface MapMarker {
+  x: number;
+  z: number;
+  kind: "race" | "camera" | "trap";
+  label: string;
+}
+
+export function fmtTime(t: number): string {
+  if (!Number.isFinite(t) || t <= 0) return "--:--.--";
+  const m = Math.floor(t / 60);
+  const s = t - m * 60;
+  return `${m}:${s < 10 ? "0" : ""}${s.toFixed(2)}`;
+}
+
 export class Hud {
   readonly root: HTMLDivElement;
   private heatEl: HTMLDivElement;
@@ -60,6 +95,15 @@ export class Hud {
   private bustFill: HTMLElement;
   private result: HTMLDivElement;
   private pursuit: PursuitHud | null = null;
+  private raceEl: HTMLDivElement;
+  private raceBig: HTMLDivElement;
+  private countdownEl: HTMLDivElement;
+  private arrow: HTMLDivElement;
+  private popups: HTMLDivElement;
+  private board: HTMLDivElement;
+  private trapEl: HTMLDivElement;
+  private race: RaceHud | null = null;
+  private markers: MapMarker[] = [];
   private speedo: HTMLCanvasElement;
   private sctx: CanvasRenderingContext2D;
   private mini: HTMLCanvasElement;
@@ -135,6 +179,24 @@ export class Hud {
     this.root.appendChild(this.bustEl);
     this.result = el("div", "result");
     this.root.appendChild(this.result);
+
+    // Race: position / lap / time panel, big messages, countdown, checkpoint
+    // arrow, results board; popups (near miss, speed camera); trap timer.
+    this.raceEl = el("div", "race");
+    this.root.appendChild(this.raceEl);
+    this.raceBig = el("div", "race-big");
+    this.root.appendChild(this.raceBig);
+    this.countdownEl = el("div", "countdown");
+    this.root.appendChild(this.countdownEl);
+    this.arrow = el("div", "cp-arrow");
+    this.arrow.innerHTML = '<svg viewBox="0 0 40 40"><path d="M20 3 L35 34 L20 26 L5 34 Z"/></svg><span></span>';
+    this.root.appendChild(this.arrow);
+    this.popups = el("div", "popups");
+    this.root.appendChild(this.popups);
+    this.board = el("div", "board");
+    this.root.appendChild(this.board);
+    this.trapEl = el("div", "trap");
+    this.root.appendChild(this.trapEl);
 
     this.mapImg = this.renderMap();
   }
@@ -289,6 +351,81 @@ export class Hud {
     this.fps.style.display = s.fps === null ? "none" : "block";
   }
 
+  /** Race panel + checkpoint arrow (null hides them). `camHeading` turns the arrow. */
+  setRace(r: RaceHud | null, px: number, pz: number, camHeading: number): void {
+    this.race = r;
+    this.raceEl.classList.toggle("show", !!r);
+    this.arrow.classList.toggle("show", !!r);
+    if (!r) return;
+    const ord = (n: number) => `${n}${n === 1 ? "st" : n === 2 ? "nd" : n === 3 ? "rd" : "th"}`;
+    this.raceEl.innerHTML = `<div class="rc-name">${r.name}</div><div class="rc-pos"><b>${ord(r.position)}</b><span>/ ${r.racers}</span></div><div class="rc-row"><span>LAP</span><b>${Math.min(r.lap, r.laps)} / ${r.laps}</b></div><div class="rc-row"><span>TIME</span><b>${fmtTime(Math.max(0, r.time))}</b></div><div class="rc-row dim"><span>BEST</span><b>${fmtTime(r.best)}</b></div><div class="rc-row dim"><span>CHECKPOINT</span><b>${Math.min(r.gate, r.gates)} / ${r.gates}</b></div>`;
+    // Arrow pointing at the next checkpoint, relative to the camera.
+    const ang = Math.atan2(r.gx - px, r.gz - pz) - camHeading;
+    const d = Math.hypot(r.gx - px, r.gz - pz);
+    (this.arrow.querySelector("svg") as SVGElement).style.transform = `rotate(${-ang}rad)`;
+    (this.arrow.querySelector("span") as HTMLSpanElement).textContent = `${Math.round(d)} m`;
+    this.arrow.classList.toggle("wrong", r.wrongWay);
+  }
+
+  /** Big centred race message ("WRONG WAY", "FINAL LAP"...), or null. */
+  setRaceBig(text: string | null, kind: "warn" | "info" = "info"): void {
+    this.raceBig.textContent = text ?? "";
+    this.raceBig.dataset.kind = kind;
+    this.raceBig.classList.toggle("show", !!text);
+  }
+
+  /** Countdown digit (3, 2, 1, GO) or null. */
+  setCountdown(text: string | null): void {
+    if (this.countdownEl.dataset.text === (text ?? "")) return;
+    this.countdownEl.dataset.text = text ?? "";
+    this.countdownEl.textContent = text ?? "";
+    this.countdownEl.classList.remove("pop");
+    if (text) {
+      void this.countdownEl.offsetWidth;
+      this.countdownEl.classList.add("pop");
+    }
+  }
+
+  /** Floating score popup (near miss, speed camera). */
+  popup(title: string, sub = "", kind: "nitro" | "gold" | "silver" | "bronze" | "none" = "nitro"): void {
+    const p = el("div", `popup ${kind}`);
+    p.appendChild(el("div", "p-title", title));
+    if (sub) p.appendChild(el("div", "p-sub", sub));
+    this.popups.appendChild(p);
+    while (this.popups.children.length > 3) this.popups.firstElementChild?.remove();
+    setTimeout(() => p.remove(), 1900);
+  }
+
+  /** Race results board (null hides it). */
+  setBoard(title: string | null, rows: { pos: number; name: string; time: number; you: boolean }[] = [], foot = ""): void {
+    if (!title) {
+      this.board.classList.remove("show");
+      return;
+    }
+    this.board.replaceChildren();
+    this.board.appendChild(el("div", "b-title", title));
+    const t = el("div", "b-rows");
+    for (const r of rows) {
+      const row = el("div", `b-row${r.you ? " you" : ""}`);
+      row.append(el("span", "b-pos", String(r.pos)), el("span", "b-name", r.name), el("span", "b-time", r.time > 0 ? fmtTime(r.time) : "DNF"));
+      t.appendChild(row);
+    }
+    this.board.appendChild(t);
+    if (foot) this.board.appendChild(el("div", "b-foot", foot));
+    this.board.classList.add("show");
+  }
+
+  /** Live speed-trap readout (average so far), or null. */
+  setTrap(name: string | null, kmh = 0, target = 0): void {
+    this.trapEl.classList.toggle("show", !!name);
+    if (name) this.trapEl.innerHTML = `<div class="t-name">${name}</div><div class="t-val">${Math.round(kmh)} <small>km/h avg</small></div><div class="t-tgt">gold ${target} km/h</div>`;
+  }
+
+  /** Race starts, cameras and traps for the minimap / map. */
+  setMarkers(m: MapMarker[]): void {
+    this.markers = m;
+  }
+
   /** Heat meter, evade / cooldown bar, busted meter and police blips. */
   setPursuit(p: PursuitHud): void {
     this.pursuit = p;
@@ -432,6 +569,43 @@ export class Hud {
       g.lineWidth = 2 / k;
       g.stroke();
     }
+    // Race: route line, next checkpoint, rivals.
+    const rc = this.race;
+    if (rc) {
+      g.strokeStyle = "rgba(60,200,255,0.9)";
+      g.lineWidth = 6 / k;
+      g.lineJoin = "round";
+      g.beginPath();
+      rc.route.forEach((p, i) => {
+        const [x, y] = Hud.toMap(p.x, p.z);
+        if (i === 0) g.moveTo(x - px, y - py);
+        else g.lineTo(x - px, y - py);
+      });
+      g.stroke();
+      const [cx, cy] = Hud.toMap(rc.gx, rc.gz);
+      g.fillStyle = "#3cd0ff";
+      g.beginPath();
+      g.arc(cx - px, cy - py, 9 / k, 0, Math.PI * 2);
+      g.fill();
+      g.strokeStyle = "#fff";
+      g.lineWidth = 2 / k;
+      g.stroke();
+      for (const r of rc.rivals) {
+        const [x, y] = Hud.toMap(r.x, r.z);
+        g.fillStyle = "#ffd166";
+        g.beginPath();
+        g.arc(x - px, y - py, 6 / k, 0, Math.PI * 2);
+        g.fill();
+        g.strokeStyle = "#111";
+        g.stroke();
+      }
+    } else {
+      for (const mk of this.markers) {
+        const [x, y] = Hud.toMap(mk.x, mk.z);
+        if (Math.abs(x - px) > 400 || Math.abs(y - py) > 400) continue;
+        drawMarker(g, x - px, y - py, mk.kind, 1 / k);
+      }
+    }
     // Police blips: flashing red / blue (roadblocks steady red, patrols dim blue).
     const pur = this.pursuit;
     if (pur) {
@@ -515,6 +689,15 @@ export class Hud {
       g.textBaseline = "middle";
       g.fillText(known ? carById(sp.carId).name.split(" ").slice(0, 2).join(" ") : "???", x + 9, y);
     }
+    for (const mk of this.markers) {
+      const [mx, my] = Hud.toMap(mk.x, mk.z, MAP_SCALE * k);
+      drawMarker(g, mx, my, mk.kind, 1);
+      g.font = "600 11px system-ui, sans-serif";
+      g.fillStyle = mk.kind === "race" ? "#ffd166" : "#ffffff";
+      g.textAlign = "left";
+      g.textBaseline = "middle";
+      g.fillText(mk.label, mx + 10, my);
+    }
     const [x, y] = Hud.toMap(s.x, s.z, MAP_SCALE * k);
     g.save();
     g.translate(x, y);
@@ -590,4 +773,34 @@ export class Hud {
     void this.flash.offsetWidth;
     this.flash.classList.add("go");
   }
+}
+
+/** Map icon: chequered flag (race), camera (speed camera), gauge (trap). */
+function drawMarker(g: CanvasRenderingContext2D, x: number, y: number, kind: MapMarker["kind"], u: number): void {
+  g.save();
+  g.translate(x, y);
+  g.scale(u, u);
+  g.fillStyle = kind === "race" ? "#ffb000" : kind === "camera" ? "#e9eef5" : "#ff4d4d";
+  g.strokeStyle = "#111";
+  g.lineWidth = 2;
+  g.beginPath();
+  g.arc(0, 0, 8, 0, Math.PI * 2);
+  g.fill();
+  g.stroke();
+  g.fillStyle = "#111";
+  if (kind === "race") {
+    for (let i = 0; i < 2; i++) for (let j = 0; j < 2; j++) if ((i + j) % 2 === 0) g.fillRect(-4 + i * 4, -4 + j * 4, 4, 4);
+  } else if (kind === "camera") {
+    g.fillRect(-4, -2.5, 8, 5);
+    g.beginPath();
+    g.arc(0, 0, 1.6, 0, Math.PI * 2);
+    g.fillStyle = "#e9eef5";
+    g.fill();
+  } else {
+    g.font = "900 9px system-ui, sans-serif";
+    g.textAlign = "center";
+    g.textBaseline = "middle";
+    g.fillText("S", 0, 0.5);
+  }
+  g.restore();
 }

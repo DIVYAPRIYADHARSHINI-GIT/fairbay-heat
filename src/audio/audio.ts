@@ -110,6 +110,10 @@ export class GameAudio {
   private roadFilter!: BiquadFilterNode;
   private gravelGain!: GainNode;
   private windGain!: GainNode;
+  private rubGain!: GainNode;
+  private rainGain!: GainNode;
+  private hissGain!: GainNode;
+  private nitroGain!: GainNode;
   private windFilter!: BiquadFilterNode;
   private noiseBuf!: AudioBuffer;
   private voices: TrafficVoice[] = [];
@@ -190,6 +194,42 @@ export class GameAudio {
     this.gravelGain = ctx.createGain();
     this.gravelGain.gain.value = 0;
     this.loopNoise().connect(gf).connect(this.gravelGain).connect(this.master);
+
+    // Body rub: a soft rubber / panel scrape while brushing past a car.
+    const rf = ctx.createBiquadFilter();
+    rf.type = "bandpass";
+    rf.frequency.value = 520;
+    rf.Q.value = 1.6;
+    this.rubGain = ctx.createGain();
+    this.rubGain.gain.value = 0;
+    this.loopNoise().connect(rf).connect(this.rubGain).connect(this.master);
+
+    // Rain on the roof and road: broadband patter (high-passed noise) plus
+    // tyre hiss on wet asphalt that rises with speed.
+    const rhp = ctx.createBiquadFilter();
+    rhp.type = "highpass";
+    rhp.frequency.value = 1400;
+    const rlp = ctx.createBiquadFilter();
+    rlp.type = "lowpass";
+    rlp.frequency.value = 7500;
+    this.rainGain = ctx.createGain();
+    this.rainGain.gain.value = 0;
+    this.loopNoise().connect(rhp).connect(rlp).connect(this.rainGain).connect(this.master);
+    const hbp = ctx.createBiquadFilter();
+    hbp.type = "bandpass";
+    hbp.frequency.value = 2600;
+    hbp.Q.value = 0.5;
+    this.hissGain = ctx.createGain();
+    this.hissGain.gain.value = 0;
+    this.loopNoise().connect(hbp).connect(this.hissGain).connect(this.master);
+    // Nitro: a rushing, rising hiss while the bottle is open.
+    const nbp = ctx.createBiquadFilter();
+    nbp.type = "bandpass";
+    nbp.frequency.value = 3200;
+    nbp.Q.value = 0.8;
+    this.nitroGain = ctx.createGain();
+    this.nitroGain.gain.value = 0;
+    this.loopNoise().connect(nbp).connect(this.nitroGain).connect(this.master);
 
     // Wind.
     this.windFilter = ctx.createBiquadFilter();
@@ -298,12 +338,21 @@ export class GameAudio {
     enclosure: number;
     paused: boolean;
     camera: number;
+    /** Brushing past another car right now. */
+    rubbing?: boolean;
+    /** Rain intensity 0..1 and road wetness 0..1. */
+    rain?: number;
+    wet?: number;
+    /** Nitro firing. */
+    nitro?: boolean;
   }): void {
     const ctx = this.ctx;
     if (!ctx) return;
     const t = ctx.currentTime;
     if (s.paused) {
-      for (const g of [this.engineGain, this.squealGain, this.windGain, this.roadGain, this.gravelGain]) g.gain.setTargetAtTime(0, t, 0.08);
+      for (const g of [this.engineGain, this.squealGain, this.windGain, this.roadGain, this.gravelGain, this.rubGain, this.hissGain, this.nitroGain]) g.gain.setTargetAtTime(0, t, 0.08);
+      // Rain keeps falling in the pause menu, just quieter.
+      this.rainGain.gain.setTargetAtTime((s.rain ?? 0) * 0.05, t, 0.3);
       this.sendEngine({ rpm: s.rpm, load: 0, limiter: false, gain: 0 });
       for (const v of this.voices) v.gain.gain.setTargetAtTime(0, t, 0.08);
       for (const v of this.sirens) v.gain.gain.setTargetAtTime(0, t, 0.08);
@@ -325,6 +374,10 @@ export class GameAudio {
     this.roadGain.gain.setTargetAtTime(s.grounded ? roll * (s.offroad ? 0.5 : 0.28) : 0, t, 0.1);
     this.roadFilter.frequency.setTargetAtTime(120 + roll * 380, t, 0.2);
     this.gravelGain.gain.setTargetAtTime(s.grounded && s.offroad ? clamp(v / 25, 0, 1) * 0.12 : 0, t, 0.08);
+    this.rubGain.gain.setTargetAtTime(s.rubbing ? 0.1 : 0, t, s.rubbing ? 0.02 : 0.08);
+    this.rainGain.gain.setTargetAtTime((s.rain ?? 0) * 0.13, t, 0.3);
+    this.hissGain.gain.setTargetAtTime(s.grounded ? (s.wet ?? 0) * clamp(v / 30, 0, 1) * 0.12 : 0, t, 0.15);
+    this.nitroGain.gain.setTargetAtTime(s.nitro ? 0.07 : 0, t, s.nitro ? 0.03 : 0.12);
     const wind = clamp(v / 85, 0, 1);
     this.windGain.gain.setTargetAtTime(wind * wind * (s.camera === 2 ? 0.5 : 0.32), t, 0.15);
     this.windFilter.frequency.setTargetAtTime(350 + wind * 1400, t, 0.2);

@@ -28,6 +28,17 @@ async function teleport(x, z, heading) {
   await waitSim(page, 0.05);
 }
 
+/** Presses ArrowDown/ArrowUp until the open menu highlights row `id` (real key presses). */
+async function menuTo(screen, id) {
+  for (let i = 0; i < 30; i++) {
+    const cur = await page.evaluate((sc) => document.querySelector(`[data-screen="${sc}"] .menu-item.active`)?.dataset.id ?? null, screen);
+    if (cur === id) return true;
+    const order = await page.evaluate((sc) => [...document.querySelectorAll(`[data-screen="${sc}"] .menu-item`)].map((e) => e.dataset.id), screen);
+    await press(page, order.indexOf(id) > order.indexOf(cur) ? "ArrowDown" : "ArrowUp", 50);
+  }
+  return false;
+}
+
 /** Puts the car in a lane of a named road, with traffic cleared and paused for a clean test. */
 async function onRoad(id, t = 0.1, lane = 0, traffic = false) {
   await page.evaluate(
@@ -74,6 +85,10 @@ try {
   await press(page, "Enter", 500);
   let s = await snap(page);
   check("Drive starts the game", s.state === "drive", s.state);
+  check("the first drive shows the controls card automatically", s.controlsCard === true);
+  await shot("02b-controls-card");
+  await press(page, "KeyW", 200);
+  check("...and a driving key closes it (it does not come back)", (await snap(page)).controlsCard === false && (await page.evaluate(() => window.__fh.save.seenControls)) === true);
   check("starts in the Fjord Mustanger GT", s.car === "mustanger");
   check("HUD is visible while driving", await page.$eval(".hud", (e) => !e.classList.contains("hidden")));
 
@@ -610,6 +625,161 @@ try {
   if (escaped) await shot("25-escaped");
   await page.waitForFunction(() => window.__fh.heat.state === "calm", { timeout: 20000 });
 
+  section("Stage 4: races, speed cameras, near misses, rubbing past cars");
+  await page.evaluate(() => {
+    const g = window.__fh;
+    g.police.setEnabled(false);
+    g.env.setHours(15);
+    g.env.speed = 0;
+    g.traffic.enabled = true;
+    g.traffic.target = 48;
+  });
+  const rstart = await page.evaluate(() => {
+    const r = window.__fh.raceStarts.find((x) => x.def.id === "midtown-sprint");
+    window.__fh.teleport(r.x, r.z, r.heading);
+    return { x: r.x, z: r.z };
+  });
+  await waitSim(page, 3);
+  s = await snap(page);
+  check("race starts are on the map and the minimap (4 races, 6 speed events)", (await page.evaluate(() => [window.__fh.raceStarts.length, window.__fh.speedEvents.events.length])).join() === "4,6");
+  const rp = await page.$eval(".prompt", (e) => ({ show: e.classList.contains("show"), text: e.textContent }));
+  check("parking at a race beacon shows the E prompt to start it", s.raceHere === "midtown-sprint" && rp.show && /Start Midtown Rush/.test(rp.text), rp.text);
+  const trafficFree = s.traffic;
+  await press(page, "KeyE", 400);
+  s = await snap(page);
+  check("pressing E starts the race with a countdown and 3 rivals on the grid", s.race && s.race.state === "countdown" && s.race.racers === 4, JSON.stringify(s.race));
+  check("traffic is reduced during the race (about a third of normal)", s.traffic <= Math.round(48 * 0.35) && (await page.evaluate(() => window.__fh.traffic.target)) === Math.round(48 * 0.35), `${trafficFree} -> ${s.traffic} cars`);
+  await waitSim(page, 1.3);
+  const cd = await page.$eval(".countdown", (e) => e.textContent);
+  check("the countdown is shown (3, 2, 1)", /^[123]$/.test(cd), cd);
+  await shot("26-race-countdown");
+  await page.waitForFunction(() => window.__fh.race && window.__fh.race.state === "racing", { timeout: 20000 });
+  check("GO: the race is running and the race panel shows position, lap and time", await page.$eval(".race", (e) => e.classList.contains("show") && /LAP/.test(e.textContent) && /\d(st|nd|rd|th)/.test(e.textContent)));
+  // Drive the route with the keyboard: steer towards the checkpoint arrow.
+  const drove = await page.evaluate(async () => {
+    const g = window.__fh;
+    const keys = { KeyW: false, KeyA: false, KeyD: false, KeyS: false };
+    const set = (code, on) => {
+      if (keys[code] === on) return;
+      keys[code] = on;
+      window.dispatchEvent(new KeyboardEvent(on ? "keydown" : "keyup", { code, bubbles: true }));
+    };
+    const t0 = g.simTime;
+    const L = g.race.route.line;
+    let cursor = 0;
+    while (g.race && !g.race.player.finished && g.simTime - t0 < 140) {
+      const c = g.car;
+      const pr = L.project(c.x, c.z);
+      if (Math.abs(pr.s - cursor) < 60) cursor = pr.s;
+      const aim = L.sample(Math.min(L.length, cursor + 10 + c.speed * 0.5));
+      let err = Math.atan2(aim.x - c.x, aim.z - c.z) - c.heading;
+      while (err > Math.PI) err -= 2 * Math.PI;
+      while (err < -Math.PI) err += 2 * Math.PI;
+      set("KeyA", err > 0.04);
+      set("KeyD", err < -0.04);
+      const fast = c.speed > (Math.abs(err) > 0.3 ? 14 : 30);
+      set("KeyW", !fast);
+      set("KeyS", c.speed > (Math.abs(err) > 0.3 ? 18 : 36));
+      await new Promise((r) => requestAnimationFrame(r));
+    }
+    for (const k of Object.keys(keys)) set(k, false);
+    return { finished: !!g.race?.player.finished, passed: g.race?.player.passed ?? -1, time: g.race?.time ?? 0, gates: g.race?.totalGates ?? 0, best: g.save.races["midtown-sprint"]?.best ?? 0 };
+  });
+  check("driving the route with W/A/D passes every checkpoint and finishes the race", drove.finished || drove.best > 0, JSON.stringify(drove));
+  await waitSim(page, 2.2);
+  await shot("27-race-results");
+  const board = await page.$eval(".board", (e) => ({ show: e.classList.contains("show"), text: e.textContent }));
+  check("a results board lists all 4 racers with times", board.show && (board.text.match(/\d:\d\d\.\d\d/g) ?? []).length >= 2 && /You/.test(board.text), board.text.slice(0, 120));
+  const rec = await page.evaluate(() => window.__fh.save.races["midtown-sprint"]);
+  check("the best time is saved", !!rec && rec.best > 30, JSON.stringify(rec));
+  await page.waitForFunction(() => window.__fh.race === null, { timeout: 15000 }).catch(() => {});
+  check("after the race, normal traffic returns", (await page.evaluate(() => window.__fh.traffic.target)) === 48);
+
+  // Speed camera: drive through the I-9 viaduct camera flat out.
+  const camRes = await page.evaluate(async () => {
+    const g = window.__fh;
+    g.traffic.clear();
+    g.traffic.enabled = false;
+    const e = g.speedEvents.events.find((x) => x.def.id === "cam-i9");
+    const r = g.city.net.road("i9-2");
+    const proj = r.center.project(e.a.x, e.a.z);
+    const p = g.city.net.pointOn("i9-2", proj.s - 260, r.laneOffset(1));
+    g.teleport(p.x, p.z, p.heading);
+    g.car.vx = Math.sin(p.heading) * 55;
+    g.car.vz = Math.cos(p.heading) * 55;
+    g.speedEvents.reset(g.car.x, g.car.z);
+    return { best: g.save.speed["cam-i9"] ?? 0 };
+  });
+  await page.keyboard.down("KeyW");
+  const flashed = await page
+    .waitForFunction((b) => (window.__fh.save.speed["cam-i9"] ?? 0) > b, { timeout: 20000 }, camRes.best)
+    .then(() => true)
+    .catch(() => false);
+  await page.keyboard.up("KeyW");
+  const camSpeed = await page.evaluate(() => window.__fh.save.speed["cam-i9"] ?? 0);
+  const pop = await page.$$eval(".popup .p-sub", (n) => n.map((e) => e.textContent).join(" | "));
+  check("a speed camera photographs your speed (popup with medal, record saved)", flashed && camSpeed > 150 && /SPEED CAMERA/.test(pop), `${camSpeed.toFixed(0)} km/h ${pop}`);
+  await shot("28-speed-camera");
+  await brakeToStop(page);
+
+  // Near miss: overtake a slow traffic car closely at speed.
+  const nmBefore = (await snap(page)).nearMisses;
+  await page.evaluate(() => {
+    const g = window.__fh;
+    g.traffic.clear();
+    g.traffic.enabled = true;
+    g.traffic.target = 0;
+    const lane = g.city.net.road("i9-2").lanesFwd[0];
+    const t = g.traffic.add(lane, 400);
+    t.temper = 0.4;
+    t.v = 10;
+    const back = lane.poly.sample(400 - 120);
+    const p = g.city.net.road("i9-2");
+    const pr = p.center.project(back.x, back.z);
+    const q = g.city.net.pointOn("i9-2", pr.s, p.laneOffset(1));
+    g.teleport(q.x, q.z, q.heading);
+    g.car.vx = Math.sin(q.heading) * 35;
+    g.car.vz = Math.cos(q.heading) * 35;
+    g.car.nitro = 0.2;
+  });
+  await page.keyboard.down("KeyW");
+  await waitSim(page, 6);
+  await page.keyboard.up("KeyW");
+  s = await snap(page);
+  check("overtaking a car closely at speed is a NEAR MISS that tops up nitro", s.nearMisses > nmBefore && s.nitro > 0.2, `near misses ${s.nearMisses - nmBefore}, nitro ${s.nitro.toFixed(2)}`);
+  await brakeToStop(page);
+
+  // Rubbing: brush past a car alongside - no crash, it stays in its lane.
+  const rubbed = await page.evaluate(async () => {
+    const g = window.__fh;
+    g.traffic.clear();
+    g.traffic.target = 0;
+    const lane = g.city.net.road("i9-2").lanesFwd[0];
+    const t = g.traffic.add(lane, 300);
+    t.temper = 0.6;
+    t.v = 18;
+    g.traffic.step(1 / 60, null, t.x, t.z, null);
+    const h = t.heading;
+    const rx = -Math.cos(h);
+    const rz = Math.sin(h);
+    // Alongside, slightly behind, overlapping its side by 0.15 m, drifting in at 1.5 m/s.
+    const lat = (t.model.width + g.car.def.body.width) / 2 - 0.15;
+    g.teleport(t.x + rx * lat - Math.sin(h) * 1, t.z + rz * lat - Math.cos(h) * 1, h);
+    g.car.vx = Math.sin(h) * 24 - rx * 1.5;
+    g.car.vz = Math.cos(h) * 24 - rz * 1.5;
+    const hits0 = g.trafficHits;
+    const rubs0 = g.rubs;
+    await new Promise((r) => setTimeout(r, 400));
+    return { hits: g.trafficHits - hits0, rubs: g.rubs - rubs0, wrecked: t.wrecked > 0, alive: t.alive };
+  });
+  check("brushing past a car is a rub, not a crash (no knock-out, no crash effects)", rubbed.rubs > 0 && rubbed.hits === 0 && !rubbed.wrecked, JSON.stringify(rubbed));
+  await brakeToStop(page);
+  await page.evaluate(() => {
+    const g = window.__fh;
+    g.traffic.target = 48;
+    g.police.setEnabled(true);
+  });
+
   section("Settings + persistence");
   await press(page, "Escape", 300);
   for (let i = 0; i < 5; i++) await press(page, "ArrowDown", 60);
@@ -632,8 +802,60 @@ try {
   await press(page, "ArrowRight", 200);
   const polOn = await page.evaluate(() => [window.__fh.save.police, window.__fh.police.enabled]);
   check("Police chases can be switched off (free roam) and back on in Settings", polOff[0] === false && polOff[1] === false && polOn[0] === true && polOn[1] === true, JSON.stringify({ polOff, polOn }));
+  await press(page, "ArrowDown", 60);
+  await press(page, "ArrowRight", 250);
+  const rainOn = await page.evaluate(() => [window.__fh.save.rain, window.__fh.weather.rain]);
+  check("Rain can be turned on in Settings", rainOn[0] === "on" && rainOn[1] > 0.5, JSON.stringify(rainOn));
   await press(page, "Escape", 200);
   await press(page, "Escape", 300);
+  await onRoad("main-5", 0.3, 0, true);
+  await holdSim(page, ["KeyW"], 2);
+  s = await snap(page);
+  check("in the rain the road is wet and the car feels it (wet grip)", s.rain > 0.5 && s.wet > 0.5 && (await page.evaluate(() => window.__fh.car.wet)) > 0.5, `rain ${s.rain.toFixed(2)} wet ${s.wet.toFixed(2)}`);
+  await shot("29-rain");
+  await brakeToStop(page);
+  await press(page, "Escape", 300);
+  await menuTo("pause", "settings");
+  await press(page, "Enter", 300);
+  await menuTo("settings", "rain");
+  await press(page, "ArrowLeft", 250);
+  await press(page, "ArrowLeft", 250);
+  check("...and back to dry", (await page.evaluate(() => window.__fh.save.rain)) === "off");
+  await menuTo("settings", "keys");
+  await press(page, "Enter", 300);
+  check("Controls opens the key-remap screen", (await snap(page)).state === "keys");
+  await shot("30-remap");
+  // Rebind Nitro to N.
+  await menuTo("keys", "key-nitro");
+  await press(page, "Enter", 200);
+  await press(page, "KeyN", 300);
+  const nitroKeys = await page.evaluate(() => [window.__fh.input.bindings.nitro, window.__fh.save.keys.nitro]);
+  check("Enter then a key rebinds an action (Nitro -> N), saved", nitroKeys[0][0] === "KeyN" && nitroKeys[1]?.[0] === "KeyN", JSON.stringify(nitroKeys));
+  await press(page, "Escape", 300);
+  await press(page, "Escape", 200);
+  await press(page, "Escape", 300);
+  await onRoad("i9-2", 0.22, 1);
+  await page.evaluate(() => (window.__fh.car.nitro = 1));
+  await holdSim(page, ["KeyW"], 1);
+  await page.keyboard.down("KeyW");
+  await page.keyboard.down("KeyN");
+  await waitSim(page, 0.4);
+  const nOn = (await snap(page)).nitroActive;
+  await page.keyboard.up("KeyN");
+  await page.keyboard.up("KeyW");
+  check("the remapped key works in the car (N fires nitro)", nOn);
+  await brakeToStop(page);
+  // Reset bindings to defaults again for the rest of the run.
+  await press(page, "Escape", 300);
+  await menuTo("pause", "settings");
+  await press(page, "Enter", 300);
+  await menuTo("settings", "keys");
+  await press(page, "Enter", 300);
+  await menuTo("keys", "keys-reset");
+  await press(page, "Enter", 250);
+  check("Reset to defaults restores Shift for nitro", (await page.evaluate(() => window.__fh.input.bindings.nitro[0])) === "ShiftLeft");
+  // Back out: keys -> settings -> pause -> driving.
+  for (let i = 0; i < 4 && (await snap(page)).state !== "drive"; i++) await press(page, "Escape", 300);
   check("back out to driving", (await snap(page)).state === "drive");
   const before = await snap(page);
   await page.evaluate(() => window.__fh.persist());

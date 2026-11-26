@@ -96,7 +96,13 @@ export class Environment {
   private envSky: Sky;
   private lastEnvHours = -99;
   private sunDir = new THREE.Vector3();
-  private stars: THREE.Points<THREE.BufferGeometry, THREE.PointsMaterial>;
+  private stars: THREE.Points<THREE.BufferGeometry, THREE.ShaderMaterial>;
+  private moon: THREE.Sprite;
+  private moonGlow: THREE.Sprite;
+  private ranges: THREE.Mesh[] = [];
+  private rangeMats: THREE.MeshBasicMaterial[] = [];
+  /** Cloud cover 0..1 (raised by rain). */
+  clouds = 0.35;
 
   constructor(
     private scene: THREE.Scene,
@@ -138,23 +144,116 @@ export class Environment {
     this.fog = new THREE.Fog(0xb9d1e6, 250, 1500);
     scene.fog = this.fog;
 
-    // Stars.
-    const n = 1500;
+    // Stars: 2600 points with a realistic spread of brightness (lots of faint
+    // ones, a few bright), slight colour (blue-white to orange), a band of
+    // extra stars for the Milky Way, and gentle twinkle.
+    const n = 2600;
     const pos = new Float32Array(n * 3);
+    const mag = new Float32Array(n);
+    const col = new Float32Array(n * 3);
+    const ph = new Float32Array(n);
     let seed = 42;
     const rnd = () => ((seed = (seed * 16807) % 2147483647) / 2147483647);
+    const tint = [new THREE.Color("#a9c4ff"), new THREE.Color("#ffffff"), new THREE.Color("#fff1d6"), new THREE.Color("#ffcf9a")];
     for (let i = 0; i < n; i++) {
-      const u = rnd() * Math.PI * 2;
-      const v = Math.acos(rnd() * 0.95);
+      let u = rnd() * Math.PI * 2;
+      let v = Math.acos(rnd() * 0.97);
+      if (i < 900) {
+        // Milky Way: a tilted great-circle band.
+        u = rnd() * Math.PI * 2;
+        const off = (rnd() + rnd() + rnd() - 1.5) * 0.18;
+        const bx = Math.cos(u);
+        const by = Math.sin(u) * 0.55 + off;
+        const bz = Math.sin(u) * 0.83 - off * 0.4;
+        const l = Math.hypot(bx, by, bz);
+        if (by / l < 0.02) {
+          v = Math.acos(rnd() * 0.97);
+          u = rnd() * Math.PI * 2;
+        } else {
+          pos.set([(bx / l) * 4000, (Math.abs(by) / l) * 4000, (bz / l) * 4000], i * 3);
+          mag[i] = 0.25 + rnd() * 0.45;
+          const c = tint[1];
+          col.set([c.r, c.g, c.b], i * 3);
+          ph[i] = rnd() * 100;
+          continue;
+        }
+      }
       pos[i * 3] = Math.sin(v) * Math.cos(u) * 4000;
       pos[i * 3 + 1] = Math.cos(v) * 4000;
       pos[i * 3 + 2] = Math.sin(v) * Math.sin(u) * 4000;
+      const r = rnd();
+      mag[i] = r < 0.82 ? 0.35 + rnd() * 0.5 : r < 0.97 ? 0.9 + rnd() * 0.8 : 1.8 + rnd() * 1.2;
+      const c = tint[Math.floor(rnd() * tint.length)];
+      col.set([c.r, c.g, c.b], i * 3);
+      ph[i] = rnd() * 100;
     }
     const g = new THREE.BufferGeometry();
     g.setAttribute("position", new THREE.BufferAttribute(pos, 3));
-    this.stars = new THREE.Points(g, new THREE.PointsMaterial({ color: 0xffffff, size: 2.2, sizeAttenuation: false, transparent: true, opacity: 0, fog: false, depthWrite: false }));
+    g.setAttribute("aMag", new THREE.BufferAttribute(mag, 1));
+    g.setAttribute("aColor", new THREE.BufferAttribute(col, 3));
+    g.setAttribute("aPhase", new THREE.BufferAttribute(ph, 1));
+    this.stars = new THREE.Points(
+      g,
+      new THREE.ShaderMaterial({
+        uniforms: { opacity: { value: 0 }, time: { value: 0 }, pixel: { value: 1 } },
+        vertexShader: /* glsl */ `
+          attribute float aMag;
+          attribute vec3 aColor;
+          attribute float aPhase;
+          uniform float time;
+          uniform float pixel;
+          varying vec3 vColor;
+          varying float vA;
+          void main() {
+            vec4 mv = modelViewMatrix * vec4(position, 1.0);
+            gl_Position = projectionMatrix * mv;
+            float tw = 0.75 + 0.25 * sin(time * (1.3 + fract(aPhase) * 2.4) + aPhase);
+            gl_PointSize = (1.2 + aMag * 1.6) * pixel;
+            vColor = aColor;
+            // Fade stars near the horizon (thicker air).
+            float h = normalize(position).y;
+            vA = clamp(aMag, 0.0, 1.0) * tw * smoothstep(0.0, 0.18, h);
+          }`,
+        fragmentShader: /* glsl */ `
+          uniform float opacity;
+          varying vec3 vColor;
+          varying float vA;
+          void main() {
+            vec2 d = gl_PointCoord - 0.5;
+            float f = smoothstep(0.5, 0.0, length(d));
+            gl_FragColor = vec4(vColor, f * vA * opacity);
+          }`,
+        transparent: true,
+        depthWrite: false,
+        blending: THREE.AdditiveBlending,
+        fog: false,
+      }),
+    );
     this.stars.renderOrder = -1;
+    this.stars.frustumCulled = false;
     scene.add(this.stars);
+
+    // Moon: a cratered disc sprite with a soft halo, rising as the sun sets.
+    this.moon = new THREE.Sprite(new THREE.SpriteMaterial({ map: moonTexture(), fog: false, depthWrite: false, transparent: true, opacity: 0 }));
+    this.moon.scale.setScalar(150);
+    this.moon.renderOrder = -1;
+    this.moonGlow = new THREE.Sprite(new THREE.SpriteMaterial({ map: glowTexture(), color: 0xbcd0ff, fog: false, depthWrite: false, transparent: true, opacity: 0, blending: THREE.AdditiveBlending }));
+    this.moonGlow.scale.setScalar(900);
+    this.moonGlow.renderOrder = -1;
+    scene.add(this.moonGlow, this.moon);
+
+    // Distant mountain ranges all round the horizon, in two layers. They sit
+    // far outside the map and take the haze colour, so the world no longer
+    // ends in empty land.
+    for (let layer = 0; layer < 2; layer++) {
+      const mat = new THREE.MeshBasicMaterial({ color: 0x8aa0b4, fog: false, transparent: true, opacity: 1, depthWrite: false });
+      const mesh = new THREE.Mesh(rangeGeometry(layer === 0 ? 5200 : 4400, layer === 0 ? 420 : 260, layer * 977 + 11, layer === 0 ? 0.9 : 1.6), mat);
+      mesh.renderOrder = -1;
+      mesh.frustumCulled = false;
+      this.ranges.push(mesh);
+      this.rangeMats.push(mat);
+      scene.add(mesh);
+    }
   }
 
   /** Follows the focus point so shadows stay crisp around the player. */
@@ -170,17 +269,43 @@ export class Environment {
     if (this.night > 0.5) elev.set(this.sunDir.x, -0.2, this.sunDir.z).normalize();
     else elev.copy(trueSun);
     u.sunPosition.value.copy(elev);
-    u.turbidity.value = k.turbidity;
-    u.rayleigh.value = k.rayleigh;
+    u.turbidity.value = k.turbidity + 8 * clamp((this.clouds - 0.35) / 0.6, 0, 1);
+    u.rayleigh.value = k.rayleigh * (1 - 0.6 * clamp((this.clouds - 0.35) / 0.6, 0, 1));
     u.mieCoefficient.value = 0.0016;
     u.mieDirectionalG.value = 0.75;
     u.time.value = timeSeconds;
-    u.cloudCoverage.value = lerp(0.35, 0.2, this.night);
-    this.stars.material.opacity = this.night;
+    // Clouds: fair-weather cumulus by day (thicker in the afternoon), thin at
+    // night; rain (this.clouds) closes the sky in.
+    const afternoon = smoothstep(10, 15, k.t) * (1 - smoothstep(18, 20, k.t));
+    u.cloudCoverage.value = clamp(lerp(0.32 + 0.12 * afternoon, 0.18, this.night) + Math.max(0, this.clouds - 0.35) * 1.3, 0, 0.95);
+    u.cloudDensity.value = lerp(0.45, 0.9, clamp((this.clouds - 0.35) * 2, 0, 1));
+    u.cloudSpeed.value = 0.00002 + Math.max(0, this.clouds - 0.35) * 0.00004;
+    const starsOn = this.night * (1 - clamp((this.clouds - 0.35) * 1.6, 0, 0.9));
+    this.stars.material.uniforms.opacity.value = starsOn;
+    this.stars.material.uniforms.time.value = timeSeconds;
+    this.stars.material.uniforms.pixel.value = this.renderer.getPixelRatio();
     this.stars.position.copy(focus);
+    this.stars.visible = starsOn > 0.01;
+    // Moon: opposite the sun, low in the east at dusk, high around midnight.
+    const mh = ((k.t - 18) / 13) * Math.PI; // 18:00 rise .. 07:00 set
+    const md = new THREE.Vector3(-Math.cos(mh) * 0.9, Math.sin(mh) * 0.75 + 0.05, 0.42).normalize();
+    this.moon.position.copy(focus).addScaledVector(md, 3600);
+    this.moonGlow.position.copy(focus).addScaledVector(md, 3700);
+    const moonUp = clamp(md.y * 6, 0, 1) * this.night * (1 - clamp((this.clouds - 0.35) * 1.4, 0, 0.85));
+    (this.moon.material as THREE.SpriteMaterial).opacity = moonUp;
+    (this.moonGlow.material as THREE.SpriteMaterial).opacity = moonUp * 0.22;
+    this.moon.visible = this.moonGlow.visible = moonUp > 0.01;
+    // Horizon ranges take the haze colour (the far one paler).
+    for (let i = 0; i < this.ranges.length; i++) {
+      this.ranges[i].position.set(focus.x, 0, focus.z);
+      const fogC = new THREE.Color(k.fog);
+      const shade = i === 0 ? 0.86 : 0.7;
+      this.rangeMats[i].color.copy(fogC).multiplyScalar(shade).lerp(new THREE.Color(k.hemiGround), 0.18 * (i + 1));
+    }
 
+    const storm = clamp((this.clouds - 0.35) / 0.6, 0, 1);
     this.sun.color.set(k.sun);
-    this.sun.intensity = k.sunI;
+    this.sun.intensity = k.sunI * (1 - 0.65 * storm);
     this.sun.position.copy(focus).addScaledVector(this.sunDir, 300);
     this.sun.target.position.copy(focus);
     // Snap the shadow camera to texels to stop shimmering while driving.
@@ -190,13 +315,14 @@ export class Environment {
       this.sun.target.position.z = Math.round(focus.z / texel) * texel;
       this.sun.position.copy(this.sun.target.position).addScaledVector(this.sunDir, 300);
     }
-    this.hemi.color.set(k.hemiSky);
+    this.hemi.color.set(k.hemiSky).lerp(new THREE.Color("#8a929c"), storm * 0.6);
     this.hemi.groundColor.set(k.hemiGround);
-    this.hemi.intensity = k.hemiI;
-    this.fog.color.set(k.fog);
-    this.fog.near = lerp(600, 180, this.night);
-    this.fog.far = lerp(3400, 1400, this.night);
-    this.renderer.toneMappingExposure = k.exposure;
+    this.hemi.intensity = k.hemiI * (1 + 0.15 * storm);
+    // Rain: grey, closer haze (spray and drizzle in the air).
+    this.fog.color.set(k.fog).lerp(new THREE.Color(this.night > 0.5 ? "#1b2027" : "#9aa3ad"), storm * 0.75);
+    this.fog.near = lerp(lerp(600, 180, this.night), 90, storm * 0.8);
+    this.fog.far = lerp(lerp(3400, 1400, this.night), 900, storm * 0.8);
+    this.renderer.toneMappingExposure = k.exposure * (1 - 0.18 * storm);
 
     if (Math.abs(this.hours - this.lastEnvHours) > 0.25 || this.envRT === null) {
       this.refreshEnv(elev, k);
@@ -223,4 +349,78 @@ export class Environment {
     this.hours = ((h % 24) + 24) % 24;
     this.lastEnvHours = -99;
   }
+}
+
+
+/** A ring of mountain silhouettes at distance `r` (m), up to `h` tall. */
+function rangeGeometry(r: number, h: number, seed: number, rough: number): THREE.BufferGeometry {
+  const N = 360;
+  const pos: number[] = [];
+  const idx: number[] = [];
+  let s = seed;
+  const rnd = () => ((s = (s * 16807) % 2147483647) / 2147483647);
+  // Sum of a few random sines around the circle = rolling peaks.
+  const waves = Array.from({ length: 7 }, (_, i) => ({ f: 2 + i * 3 + Math.floor(rnd() * 3), a: (1 / (1 + i * 0.7)) * (0.6 + rnd() * 0.6), p: rnd() * Math.PI * 2 }));
+  for (let i = 0; i <= N; i++) {
+    const a = (i / N) * Math.PI * 2;
+    let y = 0;
+    for (const w of waves) y += Math.sin(a * w.f + w.p) * w.a;
+    // Sharper ridges: fold the signal, add fine noise.
+    y = Math.abs(y) * 0.6 + 0.25 + (rnd() - 0.5) * 0.08 * rough;
+    const top = Math.max(0.08, y) * h;
+    const x = Math.cos(a) * r;
+    const z = Math.sin(a) * r;
+    pos.push(x, -60, z, x, top, z);
+    if (i < N) {
+      const b = i * 2;
+      idx.push(b, b + 2, b + 1, b + 1, b + 2, b + 3);
+    }
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
+  g.setIndex(idx);
+  return g;
+}
+
+function moonTexture(): THREE.CanvasTexture {
+  const c = document.createElement("canvas");
+  c.width = c.height = 256;
+  const g = c.getContext("2d")!;
+  const grad = g.createRadialGradient(118, 112, 10, 128, 128, 110);
+  grad.addColorStop(0, "#fbfbf4");
+  grad.addColorStop(0.8, "#dcdcd2");
+  grad.addColorStop(1, "#b7b9b4");
+  g.fillStyle = grad;
+  g.beginPath();
+  g.arc(128, 128, 110, 0, Math.PI * 2);
+  g.fill();
+  // Maria (the dark "seas") and a few craters.
+  g.fillStyle = "rgba(120,124,130,0.35)";
+  for (const [x, y, r] of [[96, 98, 30], [150, 90, 22], [140, 140, 34], [92, 150, 18], [170, 160, 14]]) {
+    g.beginPath();
+    g.ellipse(x, y, r, r * 0.8, 0.4, 0, Math.PI * 2);
+    g.fill();
+  }
+  g.strokeStyle = "rgba(90,92,96,0.35)";
+  for (const [x, y, r] of [[70, 120, 7], [120, 60, 6], [180, 120, 8], [115, 185, 9], [160, 200, 5]]) {
+    g.beginPath();
+    g.arc(x, y, r, 0, Math.PI * 2);
+    g.stroke();
+  }
+  const t = new THREE.CanvasTexture(c);
+  t.colorSpace = THREE.SRGBColorSpace;
+  return t;
+}
+
+function glowTexture(): THREE.CanvasTexture {
+  const c = document.createElement("canvas");
+  c.width = c.height = 128;
+  const g = c.getContext("2d")!;
+  const grad = g.createRadialGradient(64, 64, 0, 64, 64, 64);
+  grad.addColorStop(0, "rgba(255,255,255,0.9)");
+  grad.addColorStop(0.25, "rgba(255,255,255,0.25)");
+  grad.addColorStop(1, "rgba(255,255,255,0)");
+  g.fillStyle = grad;
+  g.fillRect(0, 0, 128, 128);
+  return new THREE.CanvasTexture(c);
 }

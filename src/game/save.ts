@@ -26,6 +26,16 @@ export interface SaveData {
   steering: number;
   /** Police chases on (off = free roam). */
   police: boolean;
+  /** Rain: "auto" (weather changes by itself), "off" or "on". */
+  rain: "auto" | "off" | "on";
+  /** Custom key bindings (action -> key codes); missing actions use defaults. */
+  keys: Record<string, string[]>;
+  /** The controls card has been shown once on the first drive. */
+  seenControls: boolean;
+  /** Race records: best time (s) and best finishing position per race id. */
+  races: Record<string, { best: number; pos: number; wins: number }>;
+  /** Best speed (km/h) per speed camera / trap id. */
+  speed: Record<string, number>;
   /** Bests. */
   topSpeedKmh: number;
   longestJump: number;
@@ -57,6 +67,11 @@ export function defaults(): SaveData {
     showFps: false,
     steering: 1,
     police: true,
+    rain: "auto",
+    keys: {},
+    seenControls: false,
+    races: {},
+    speed: {},
     topSpeedKmh: 0,
     longestJump: 0,
     bestDrift: 0,
@@ -110,6 +125,11 @@ export function parseSave(raw: string | null): SaveData {
     showFps: typeof o.showFps === "boolean" ? o.showFps : d.showFps,
     steering: num(o.steering, d.steering, 0.6, 1.6),
     police: typeof o.police === "boolean" ? o.police : d.police,
+    rain: o.rain === "off" || o.rain === "on" || o.rain === "auto" ? o.rain : d.rain,
+    keys: parseKeys(o.keys),
+    seenControls: typeof o.seenControls === "boolean" ? o.seenControls : false,
+    races: parseRecords(o.races),
+    speed: parseSpeeds(o.speed),
     topSpeedKmh: num(o.topSpeedKmh, 0, 0, 1000),
     longestJump: num(o.longestJump, 0, 0, 1000),
     bestDrift: num(o.bestDrift, 0, 0, 1e7),
@@ -144,4 +164,36 @@ function safeStorage(): Storage | null {
   } catch {
     return null;
   }
+}
+
+/** Key codes look like "KeyW", "ArrowUp", "ShiftLeft", "Digit1", "Space". */
+const CODE_RE = /^[A-Za-z][A-Za-z0-9]{1,24}$/;
+
+function parseKeys(v: unknown): Record<string, string[]> {
+  const out: Record<string, string[]> = {};
+  if (!v || typeof v !== "object") return out;
+  for (const [k, codes] of Object.entries(v as Record<string, unknown>)) {
+    if (!/^[a-z]{2,16}$/.test(k) || !Array.isArray(codes)) continue;
+    const ok = codes.filter((c): c is string => typeof c === "string" && CODE_RE.test(c)).slice(0, 3);
+    if (ok.length) out[k] = ok;
+  }
+  return out;
+}
+
+function parseRecords(v: unknown): Record<string, { best: number; pos: number; wins: number }> {
+  const out: Record<string, { best: number; pos: number; wins: number }> = {};
+  if (!v || typeof v !== "object") return out;
+  for (const [k, r] of Object.entries(v as Record<string, unknown>)) {
+    if (!/^[a-z0-9-]{2,40}$/.test(k) || !r || typeof r !== "object") continue;
+    const o = r as Record<string, unknown>;
+    out[k] = { best: num(o.best, 0, 0, 1e5), pos: Math.round(num(o.pos, 0, 0, 10)), wins: Math.round(num(o.wins, 0, 0, 1e5)) };
+  }
+  return out;
+}
+
+function parseSpeeds(v: unknown): Record<string, number> {
+  const out: Record<string, number> = {};
+  if (!v || typeof v !== "object") return out;
+  for (const [k, sp] of Object.entries(v as Record<string, unknown>)) if (/^[a-z0-9-]{2,40}$/.test(k)) out[k] = num(sp, 0, 0, 1000);
+  return out;
 }

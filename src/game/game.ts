@@ -11,27 +11,30 @@ import { RenderPass } from "three/examples/jsm/postprocessing/RenderPass.js";
 import { UnrealBloomPass } from "three/examples/jsm/postprocessing/UnrealBloomPass.js";
 import { OutputPass } from "three/examples/jsm/postprocessing/OutputPass.js";
 
-import { Input } from "../core/input";
+import { Input, REBINDABLE, RESERVED_CODES, applyBindings, keyName, type Action } from "../core/input";
 import { clamp, damp, lerp, wrapAngle } from "../core/math";
 import { CARS, carById, ratings, type CarDef } from "./cars";
 import { World, DISTRICT_NAMES, type District } from "./world";
-import { Traffic, TRAFFIC_MODELS, POLICE_MODEL } from "./traffic";
+import { Traffic, TRAFFIC_MODELS, POLICE_MODEL, type TrafficEvents } from "./traffic";
 import { Police, POLICE_CARS, type PlayerView } from "./police";
 import { HeatSystem, type HeatEvent, type Offence } from "./heat";
 import { CarPhysics, NO_CONTROLS, type Controls } from "./physics";
 import { JACK_SPOTS, JACK_SPOT_DEFS, jackable, setJackSpots, type JackSpot } from "./jack";
-import { DriftScore, JumpTracker, MIN_JUMP } from "./scoring";
+import { DriftScore, JumpTracker, MIN_JUMP, NearMiss } from "./scoring";
+import { RACES, Race, SpeedEvents, raceStart, type RaceDef } from "./race";
 import { defaults, loadSave, writeSave, type Quality, type SaveData } from "./save";
 import { collide, type CircleCollider, type Collider } from "./collision";
-import { buildCar, poseCar, type CarVisual } from "../render/carModel";
+import { buildCar, mergeCarBody, poseCar, type CarVisual } from "../render/carModel";
 import { buildWorldView, type WorldView } from "../render/worldMesh";
 import { TrafficView } from "../render/trafficView";
 import { PoliceView } from "../render/policeView";
+import { RaceView, RivalViews } from "../render/raceView";
+import { Weather } from "../render/weather";
 import { Environment } from "../render/environment";
 import { Effects } from "../render/effects";
 import { CameraRig, CAMERA_MODES } from "../render/cameraRig";
 import { GameAudio } from "../audio/audio";
-import { Hud, el } from "../ui/hud";
+import { Hud, el, fmtTime, type MapMarker } from "../ui/hud";
 import { MenuScreen, controlsTable } from "../ui/menus";
 
 export const STEP = 1 / 120;
@@ -42,7 +45,7 @@ export const STEP = 1 / 120;
 const BEAM = 60;
 const BEAM_ON_WALL = 4.5;
 
-type State = "loading" | "title" | "drive" | "paused" | "garage" | "map" | "help" | "settings";
+type State = "loading" | "title" | "drive" | "paused" | "garage" | "map" | "help" | "settings" | "keys";
 
 interface ParkedCar {
   spot: JackSpot;
@@ -83,6 +86,19 @@ export class Game {
   cityView!: WorldView;
   trafficView!: TrafficView;
   policeView!: PoliceView;
+  raceView!: RaceView;
+  rivalViews!: RivalViews;
+  readonly weather = new Weather();
+  /** The race in progress, if any. */
+  race: Race | null = null;
+  speedEvents!: SpeedEvents;
+  readonly nearMiss = new NearMiss();
+  /** Race start points (computed once). */
+  raceStarts: { def: RaceDef; x: number; y: number; z: number; heading: number }[] = [];
+  private raceEndT = 0;
+  private trafficBefore = 48;
+  private capturing: Action | null = null;
+  private controlsCard: HTMLDivElement | null = null;
   effects!: Effects;
   parked: ParkedCar[] = [];
   /** Jack spot whose car the player is currently driving (hidden from the street). */
@@ -119,6 +135,8 @@ export class Game {
   private distanceM = 0;
   private stuckTime = 0;
   private lastImpactSound = 0;
+  /** Seconds left of the "rubbing" scrape sound after brushing a car. */
+  private rubTime = 0;
   /** Headlight auto-dim factor (0..1) for walls / cars close ahead. */
   beamDim = 1;
   private beamScratch: Collider[] = [];
@@ -153,7 +171,8 @@ export class Game {
     this.heat.totalBounty = this.save.bounty;
     this.heat.escapes = this.save.escapes;
     this.heat.busts = this.save.busts;
-    this.input = new Input(window);
+    this.input = new Input(window, applyBindings(this.save.keys));
+    this.weather.mode = this.save.rain;
     this.rig = new CameraRig(this.camera);
     this.rig.mode = this.save.camera;
   }
@@ -182,6 +201,11 @@ export class Game {
     await tick();
     this.policeView = new PoliceView();
     this.scene.add(this.policeView.group);
+    this.speedEvents = new SpeedEvents(this.city.net);
+    this.raceStarts = RACES.map((def) => ({ def, ...raceStart(this.city.net, def) }));
+    this.raceView = new RaceView(this.raceStarts, this.speedEvents.events);
+    this.rivalViews = new RivalViews();
+    this.scene.add(this.raceView.group, this.rivalViews.group, this.weather.group);
     this.effects = new Effects();
     this.scene.add(this.effects.group, this.effects.speedLines);
     for (const spot of JACK_SPOTS) this.addParked(spot);
@@ -217,6 +241,7 @@ export class Game {
     this.composer.addPass(this.bloom);
     this.composer.addPass(new OutputPass());
     this.buildUi();
+    this.hud.setMarkers(this.mapMarkers());
     this.resize();
     window.addEventListener("resize", () => this.resize());
     // Compile every shader up front so the first seconds of driving don't hitch.
@@ -238,6 +263,8 @@ export class Game {
   private addParked(spot: JackSpot): void {
     const def = carById(spot.carId);
     const visual = buildCar(def, def.colors[spot.color]);
+    poseCar(visual, { steer: 0, wheelSpin: 0, roll: 0, pitch: 0, bodyPitch: 0, braking: false, reversing: false, lightsOn: false });
+    mergeCarBody(visual, { staticWheels: true });
     visual.root.position.set(spot.x, this.city.ground(spot.x, spot.z), spot.z);
     visual.root.rotation.y = spot.heading;
     visual.root.traverse((o) => {
@@ -342,6 +369,15 @@ export class Game {
       "Paused",
       [
         { id: "resume", label: "Resume", action: () => this.resume() },
+        {
+          id: "quit-race",
+          label: "Quit race",
+          disabled: () => !this.race,
+          action: () => {
+            this.endRace();
+            this.resume();
+          },
+        },
         { id: "garage", label: "Garage", action: () => this.openGarage("paused") },
         { id: "map", label: "City map", action: () => this.openMap("paused") },
         { id: "reset", label: "Reset car to road", action: () => (this.resetCar(), this.resume()) },
@@ -425,6 +461,21 @@ export class Game {
           adjust: () => this.setPolice(!this.save.police),
           hint: "Turn the police off to cruise the city without being chased",
         },
+        {
+          id: "rain",
+          label: "Rain",
+          value: () => (this.save.rain === "auto" ? "Changing weather" : this.save.rain === "on" ? "Raining" : "Dry"),
+          adjust: (d) => {
+            const order = ["off", "auto", "on"] as const;
+            const i = clamp(order.indexOf(this.save.rain) + d, 0, 2);
+            this.save.rain = order[i];
+            this.weather.mode = this.save.rain;
+            if (this.save.rain === "off") this.weather.set(0);
+            if (this.save.rain === "on") this.weather.set(0.85);
+          },
+          hint: "Rain makes roads wet: less grip, longer braking, easier slides",
+        },
+        { id: "keys", label: "Controls (remap keys)", action: () => this.openKeys() },
         { id: "fps", label: "FPS counter", value: () => (this.save.showFps ? "On" : "Off"), adjust: () => (this.save.showFps = !this.save.showFps) },
         {
           id: "wipe",
@@ -443,6 +494,25 @@ export class Game {
       ],
       "Saved automatically in this browser.",
       () => this.back(),
+    );
+
+    // Controls: remap keys. Enter on a row, then press the new key (Esc cancels).
+    this.menus.keys = new MenuScreen(
+      c,
+      "keys",
+      "Controls",
+      [
+        ...REBINDABLE.map(({ action, label }) => ({
+          id: `key-${action}`,
+          label,
+          value: () => (this.capturing === action ? "Press a key..." : this.input.bindings[action].map(keyName).join(" / ")),
+          action: () => this.captureKey(action),
+        })),
+        { id: "keys-reset", label: "Reset to defaults", action: () => this.setKeys({}) },
+        { id: "back", label: "Back", action: () => this.setState("settings") },
+      ],
+      "Enter, then press the new key. The arrow keys always keep working too.",
+      () => this.setState("settings"),
     );
 
     // Garage.
@@ -487,12 +557,12 @@ export class Game {
     this.helpEl.dataset.screen = "help";
     const hp = el("div", "panel");
     hp.appendChild(el("h2", "", "Controls"));
-    hp.appendChild(controlsTable());
+    hp.appendChild(controlsTable(this.input.bindings));
     hp.appendChild(
       el(
         "p",
         "sub",
-        "Drift (Space + steer) to fill your nitro. Find parked cars around Fairbay (orange dots on the map) and press E next to one to take it. Police: speeding past a patrol (over 95 km/h in town, 140 on highways), hitting cars or smashing lamp posts in sight of a cop starts a chase. Break line of sight and stay hidden until the cooldown bar fills to escape; stop with a cop alongside and you are busted. Heat 3+ brings roadblocks - look for the gap at the kerb. Police can be switched off in Settings.",
+        "Drift (Space + steer) or pass traffic closely at speed (NEAR MISS) to fill your nitro. Find parked cars around Fairbay (orange dots on the map) and press E next to one to take it. Races: drive into an orange beacon and press E. Speed cameras and traps are on the map (Tab). Remap any key in Settings > Controls. Police: speeding past a patrol (over 95 km/h in town, 140 on highways), hitting cars or smashing lamp posts in sight of a cop starts a chase. Break line of sight and stay hidden until the cooldown bar fills to escape; stop with a cop alongside and you are busted. Heat 3+ brings roadblocks - look for the gap at the kerb. Police can be switched off in Settings.",
       ),
     );
     const hf = el("div", "menu-foot");
@@ -510,7 +580,7 @@ export class Game {
     mp.appendChild(this.mapCanvas);
     const legend = el("div", "legend");
     legend.innerHTML =
-      '<span><i class="dot me"></i>You</span><span><i class="dot new"></i>Undiscovered car</span><span><i class="dot owned"></i>Car in your garage</span><span><i class="dot ramp"></i>Jump</span>';
+      '<span><i class="dot me"></i>You</span><span><i class="dot new"></i>Undiscovered car</span><span><i class="dot owned"></i>Car in your garage</span><span><i class="dot ramp"></i>Jump</span><span><i class="dot race"></i>Race</span><span><i class="dot cam"></i>Speed camera</span><span><i class="dot trap"></i>Speed trap</span>';
     mp.appendChild(legend);
     const mf = el("div", "menu-foot");
     mf.innerHTML = "<span><kbd>Tab</kbd> / <kbd>Esc</kbd> close</span>";
@@ -542,6 +612,9 @@ export class Game {
       case "settings":
         this.menus.settings.show();
         break;
+      case "keys":
+        this.menus.keys.show();
+        break;
       case "garage":
         this.menus.garage.show();
         break;
@@ -562,6 +635,78 @@ export class Game {
     this.setState("drive");
     this.district = "";
     this.acc = 0;
+    if (!this.save.seenControls) this.showControlsCard();
+  }
+
+  /**
+   * First drive: a controls card over the road (the game keeps running
+   * behind it). Any driving key or Enter closes it; it never shows again
+   * (H brings the full controls screen back any time).
+   */
+  showControlsCard(): void {
+    this.hideControlsCard();
+    const card = el("div", "panel controls-card");
+    card.dataset.screen = "controls-card";
+    card.appendChild(el("h2", "", "How to drive"));
+    card.appendChild(controlsTable(this.input.bindings));
+    card.appendChild(el("p", "sub", "Orange beacons are races, the map (Tab) shows speed cameras and traps. Weave close past traffic for NEAR MISS nitro. Speeding past police starts a chase."));
+    const foot = el("div", "menu-foot");
+    foot.innerHTML = `<span><kbd>${keyName(this.input.bindings.accelerate[0])}</kbd> or <kbd>Enter</kbd> to start driving</span><span><kbd>${keyName(this.input.bindings.help[0])}</kbd> shows this again</span>`;
+    card.appendChild(foot);
+    this.hud.root.appendChild(card);
+    this.controlsCard = card;
+  }
+
+  private hideControlsCard(): void {
+    if (!this.controlsCard) return;
+    this.controlsCard.remove();
+    this.controlsCard = null;
+    this.save.seenControls = true;
+    this.persist();
+  }
+
+  private openKeys(): void {
+    this.capturing = null;
+    this.setState("keys");
+  }
+
+  /** Waits for the next key press and binds it to `action`. */
+  private captureKey(action: Action): void {
+    this.capturing = action;
+    this.menus.keys.render();
+    this.input.capture = (code) => {
+      this.capturing = null;
+      if (code === "Escape" || code === "Backspace") {
+        this.menus.keys.render();
+        return;
+      }
+      if (RESERVED_CODES.has(code)) {
+        this.hud.toast("That key is reserved", `${keyName(code)} is used by the browser or the menus`, "warn");
+        this.menus.keys.render();
+        return;
+      }
+      const keys = { ...this.save.keys };
+      // A key belongs to one action: take it away from any other custom binding.
+      for (const k of Object.keys(keys)) keys[k] = keys[k].filter((c) => c !== code);
+      keys[action] = [code];
+      this.setKeys(keys);
+    };
+  }
+
+  /** Applies + saves custom bindings (empty = defaults). */
+  setKeys(keys: Record<string, string[]>): void {
+    for (const k of Object.keys(keys)) if (!keys[k].length) delete keys[k];
+    this.save.keys = keys;
+    this.input.setBindings(applyBindings(keys));
+    this.persist();
+    this.menus.keys.render();
+    this.rebuildHelp();
+  }
+
+  /** The help screen lists the current bindings. */
+  private rebuildHelp(): void {
+    const grid = this.helpEl.querySelector(".controls-grid");
+    if (grid) grid.replaceWith(controlsTable(this.input.bindings));
   }
 
   pause(): void {
@@ -665,8 +810,8 @@ export class Game {
       if (this.menus.title.key(code)) this.audio.blip(660);
       return;
     }
-    if (s === "paused" || s === "settings" || s === "garage") {
-      const m = s === "paused" ? this.menus.pause : s === "settings" ? this.menus.settings : this.menus.garage;
+    if (s === "paused" || s === "settings" || s === "garage" || s === "keys") {
+      const m = s === "paused" ? this.menus.pause : s === "settings" ? this.menus.settings : s === "keys" ? this.menus.keys : this.menus.garage;
       if (m.key(code)) this.audio.blip(660);
       return;
     }
@@ -681,6 +826,12 @@ export class Game {
     if (s !== "drive") return;
     const b = this.input.bindings;
     const is = (a: keyof typeof b) => b[a].includes(code);
+    if (this.controlsCard) {
+      if (is("accelerate") || is("brake") || is("left") || is("right") || code === "Enter" || code === "Escape" || is("help")) {
+        this.hideControlsCard();
+        if (code === "Enter" || code === "Escape" || is("help")) return;
+      }
+    }
     if (is("pause")) this.pause();
     else if (is("camera")) {
       this.hud.toast(`Camera: ${this.rig.cycle()}`);
@@ -689,13 +840,23 @@ export class Game {
     else if (is("map")) {
       this.input.clear();
       this.openMap("drive");
-    } else if (is("reset")) this.resetCar();
+    } else if (is("reset")) {
+      if (this.race && this.race.state === "racing" && !this.race.player.finished) {
+        const p = this.race.resetPoint();
+        this.car.place(p.x, p.z, p.heading, this.city.ground(p.x, p.z, p.y + 0.5));
+        this.snapPrev();
+        this.rig.snap();
+        this.speedEvents.reset(this.car.x, this.car.z);
+        this.hud.setRaceBig(null);
+      } else this.resetCar();
+    }
     else if (is("mute")) this.setMuted(!this.save.muted);
     else if (is("time")) {
       this.env.setHours(this.env.hours + 3);
       this.hud.toast("Time skipped", fmtHours(this.env.hours));
     } else if (is("garage")) {
-      if (this.car.speedKmh > 15) this.hud.toast("Slow down to open the garage", "", "warn");
+      if (this.race) this.hud.toast("Not during a race", "", "warn");
+      else if (this.car.speedKmh > 15) this.hud.toast("Slow down to open the garage", "", "warn");
       else {
         this.input.clear();
         this.openGarage("drive");
@@ -704,7 +865,11 @@ export class Game {
       this.input.clear();
       this.openHelp("drive");
     } else if (is("fps")) this.save.showFps = !this.save.showFps;
-    else if (is("jack")) this.tryJack();
+    else if (is("jack")) {
+      const rs = this.raceHere();
+      if (rs) this.startRace(rs.def);
+      else if (!this.race) this.tryJack();
+    }
   }
 
   private controls(): Controls {
@@ -796,6 +961,7 @@ export class Game {
     Object.assign(this.save, defaults(), keep);
     if (this.hiddenSpot) this.setParkedVisible(this.hiddenSpot, true);
     this.hiddenSpot = null;
+    this.endRace();
     this.heat.reset();
     this.heat.totalBounty = 0;
     this.heat.escapes = 0;
@@ -853,6 +1019,7 @@ export class Game {
         const ev = this.car.step(STEP, c, this.city.world);
         this.applyTrafficHits(this.traffic.collide(this.playerState()));
         this.applyPoliceHits(this.police.collide(this.playerView()));
+        for (const r of this.speedEvents.update(this.car.x, this.car.z, this.car.y, this.car.speed, STEP)) this.onSpeedResult(r);
         this.simTime += STEP;
         this.acc -= STEP;
         steps++;
@@ -861,6 +1028,8 @@ export class Game {
       if (steps === 24) this.acc = 0; // way behind: drop time rather than spiral
       this.stepTraffic(dt);
       this.stepPolice(dt);
+      this.stepRace(dt);
+      this.stepNearMiss(dt);
       this.gameplay(dt, c);
     }
 
@@ -913,6 +1082,14 @@ export class Game {
     this.policeView.setNight(night);
     this.policeView.update(this.police.units, this.police.patrols(), time, this.renderPos.x, this.renderPos.z);
     this.cityView.update(time, this.traffic.time);
+    // Weather: rain follows in-game time; roads get wet; the car feels it.
+    const gameHours = this.state === "drive" && this.env.speed > 0 ? dt / this.env.speed : 0;
+    this.weather.update(this.state === "drive" || this.state === "title" ? dt : 0, gameHours, this.camera, new THREE.Vector3(this.car.vx, 0, this.car.vz), time, (x, z) => this.city.ground(x, z, this.car.y));
+    this.env.clouds = 0.35 + this.weather.rain * 0.6;
+    this.cityView.setWet(this.weather.wetness);
+    this.car.wet = this.weather.wetness;
+    for (const r of this.race?.racers ?? []) if (r.phys) r.phys.wet = this.weather.wetness;
+    this.renderRace(dt, time, night);
     if (this.bloom.enabled) {
       // By day only very hot highlights bloom; at night lights and windows do.
       // The bright daytime sky sits near 1.0 after tone mapping, so a day
@@ -955,6 +1132,9 @@ export class Game {
     // HUD + sound.
     if (this.state === "drive") {
       this.hud.setPursuit(this.pursuitHud());
+      this.hud.setRace(this.raceHud(), this.car.x, this.car.z, this.renderHeading);
+      const trap = this.speedEvents.activeTrap();
+      this.hud.setTrap(trap ? trap.def.name : null, trap ? (trap.trapDist / Math.max(0.05, trap.trapT)) * 3.6 : 0, trap ? trap.def.targets[2] : 0);
       this.hud.update({
         speedKmh: this.car.speedKmh,
         rpm: this.car.rpm,
@@ -983,7 +1163,12 @@ export class Game {
       enclosure: this.enclosure(),
       paused: this.state !== "drive",
       camera: this.rig.mode,
+      rubbing: this.rubTime > 0,
+      rain: this.weather.rain,
+      wet: this.weather.wetness,
+      nitro: this.car.nitroActive && this.state === "drive",
     });
+    this.rubTime = Math.max(0, this.rubTime - dt);
     if (this.state === "drive") {
       this.audio.updateTraffic(this.trafficSounds());
       this.audio.updateSirens(this.sirenSounds());
@@ -1063,21 +1248,26 @@ export class Game {
     }
 
     // Fell in the sea / out of the world.
-    if (car.y < -1.5 || !Number.isFinite(car.x + car.z)) {
+    if (car.y < -1.5 || !Number.isFinite(car.x + car.z) || (!car.airborne && car.y < 0.3 && this.city.isWater(car.x, car.z) && this.city.net.roadAt(car.x, car.z, 2, car.y) === null)) {
       this.hud.toast("Splash!", "Car recovered to the road", "warn");
       this.resetCar();
     }
     // Stuck (e.g. wedged): offer the reset prompt.
     this.stuckTime = c.throttle > 0 && car.speed < 1 ? this.stuckTime + dt : 0;
 
-    // Jack prompt.
+    // Jack / race prompts.
     const spot = jackable(car.x, car.z, car.speedKmh, car.def.id, this.availableSpots());
-    if (spot) {
+    const rs = this.raceHere();
+    const jk = keyName(this.input.bindings.jack[0] ?? "KeyE");
+    if (rs) {
+      const rec = this.save.races[rs.def.id];
+      this.hud.setPrompt(`${jk}|Start ${rs.def.name} (${rs.def.kind === "circuit" ? `${rs.def.laps}-lap circuit` : "sprint"})${rec?.best ? ` \u00b7 best ${fmtTime(rec.best)}` : ""}`);
+    } else if (spot) {
       const def = carById(spot.carId);
       const fresh = !this.save.discovered.includes(spot.carId);
-      this.hud.setPrompt(`E|${fresh ? "Jack the" : "Switch to the"} ${def.name}${fresh ? " - NEW" : ""}`);
+      this.hud.setPrompt(`${jk}|${fresh ? "Jack the" : "Switch to the"} ${def.name}${fresh ? " - NEW" : ""}`);
     } else if (this.stuckTime > 2.5) {
-      this.hud.setPrompt("R|Stuck? Reset your car to the road");
+      this.hud.setPrompt(`${keyName(this.input.bindings.reset[0] ?? "KeyR")}|Stuck? Reset your car to the road`);
     } else {
       this.hud.setPrompt(null);
     }
@@ -1364,9 +1554,211 @@ export class Game {
     };
   }
 
+  // ===========================================================================
+  // Stage 4: races, speed cameras / traps, near misses
+  // ===========================================================================
+
+  /** The race start the player is parked next to (E starts it), if any. */
+  raceHere(): (typeof this.raceStarts)[number] | null {
+    if (this.race || this.heat.active) return null;
+    for (const s of this.raceStarts) if (Math.hypot(s.x - this.car.x, s.z - this.car.z) < 14 && this.car.speedKmh < 40 && Math.abs(s.y - this.car.y) < 4) return s;
+    return null;
+  }
+
+  /** Starts a race: grid, rivals, countdown. Traffic is thinned out for the race; the police stand down. */
+  startRace(def: RaceDef): void {
+    const rivals = def.rivals.map((id) => carById(id));
+    const race = new Race(def, this.city.net, this.city.world, rivals, "You");
+    this.race = race;
+    this.raceEndT = 0;
+    // Police leave a race alone (no chases during a race) - like a sanctioned event.
+    this.heat.reset();
+    this.police.standDown();
+    for (const c of this.police.patrols()) this.traffic.remove(c);
+    this.police.enabled = false;
+    // Less traffic during races (about a third of normal), cleared from the grid.
+    this.trafficBefore = this.traffic.target;
+    this.traffic.target = Math.round(this.trafficBefore * 0.35);
+    const ps = race.playerStart;
+    for (const t of [...this.traffic.cars]) {
+      const onRoute = race.route.line.project(t.x, t.z).dist < 14;
+      if (onRoute || Math.hypot(t.x - ps.x, t.z - ps.z) < 120 || this.traffic.cars.length > this.traffic.target) this.traffic.remove(t);
+    }
+    this.car.place(ps.x, ps.z, ps.heading, this.city.ground(ps.x, ps.z, ps.y + 0.5));
+    this.snapPrev();
+    this.rig.snap();
+    this.speedEvents.reset(this.car.x, this.car.z);
+    this.rivalViews.setCars(rivals.map((d, i) => ({ def: d, color: d.colors[(i + 1) % d.colors.length] })));
+    this.hud.toast(def.name.toUpperCase(), `${def.kind === "circuit" ? `${def.laps} laps` : "Sprint"} \u00b7 ${rivals.length} rivals \u00b7 best ${fmtTime(this.save.races[def.id]?.best ?? 0)}`, "gold");
+    this.audio.sting("heat");
+  }
+
+  /** Ends the race (finished, quit or reset) and restores traffic and police. */
+  endRace(): void {
+    if (!this.race) return;
+    this.race = null;
+    this.rivalViews.clear();
+    this.traffic.target = this.trafficBefore;
+    this.police.enabled = this.save.police;
+    this.hud.setRace(null, 0, 0, 0);
+    this.hud.setRaceBig(null);
+    this.hud.setCountdown(null);
+    this.hud.setBoard(null);
+  }
+
+  private stepRace(dt: number): void {
+    const race = this.race;
+    if (!race) return;
+    const d = Math.min(dt, 0.05);
+    const wasCountdown = race.state === "countdown";
+    const ev = race.step(d, this.car, this.traffic);
+    // Countdown digits; the player's car is held on the grid until GO.
+    if (race.state === "countdown") {
+      const n = Math.ceil(-race.time);
+      this.hud.setCountdown(String(n));
+      if (Math.ceil(-(race.time - d)) !== n) this.audio.blip(520);
+      this.car.vx = this.car.vz = 0;
+      const ps = race.playerStart;
+      this.car.x = ps.x;
+      this.car.z = ps.z;
+      this.car.heading = ps.heading;
+    }
+    for (const e of ev) {
+      switch (e.type) {
+        case "go":
+          this.hud.setCountdown("GO!");
+          this.audio.blip(1040, 0.25);
+          setTimeout(() => this.hud.setCountdown(null), 800);
+          break;
+        case "checkpoint":
+          this.audio.blip(880, 0.05);
+          break;
+        case "lap":
+          this.audio.sting("alert");
+          this.hud.setRaceBig(race.player.lap === race.def.laps ? "FINAL LAP" : `LAP ${race.player.lap}`, "info");
+          setTimeout(() => this.hud.setRaceBig(null), 1600);
+          break;
+        case "wrong-way":
+          this.hud.setRaceBig("WRONG WAY", "warn");
+          break;
+        case "back-on-track":
+          this.hud.setRaceBig(null);
+          break;
+        case "finish": {
+          const pos = e.position!;
+          const rec = this.save.races[race.def.id] ?? { best: 0, pos: 0, wins: 0 };
+          const newBest = rec.best === 0 || e.time! < rec.best;
+          this.save.races[race.def.id] = { best: newBest ? e.time! : rec.best, pos: rec.pos === 0 ? pos : Math.min(rec.pos, pos), wins: rec.wins + (pos === 1 ? 1 : 0) };
+          this.audio.sting(pos === 1 ? "escaped" : "heat");
+          this.hud.setRaceBig(pos === 1 ? "YOU WIN!" : `FINISHED ${pos}${pos === 2 ? "nd" : pos === 3 ? "rd" : "th"}`, "info");
+          this.raceEndT = 6;
+          if (newBest) this.hud.toast("NEW BEST TIME", `${race.def.name}: ${fmtTime(e.time!)}`, "gold");
+          this.persist();
+          break;
+        }
+      }
+    }
+    void wasCountdown;
+    // Results board after the player finishes; the race closes a few seconds later.
+    if (race.player.finished) {
+      const rows = race.standings(this.car.x, this.car.z).map((r, i) => ({ pos: i + 1, name: r.player ? "You" : r.name, time: r.finished ? r.finishTime : 0, you: r.player }));
+      if (this.raceEndT < 4.5) this.hud.setRaceBig(null);
+      if (this.raceEndT < 4.5) this.hud.setBoard(race.def.name.toUpperCase(), rows, `Best ${fmtTime(this.save.races[race.def.id]?.best ?? 0)} \u00b7 ${this.save.races[race.def.id]?.wins ?? 0} wins`);
+      this.raceEndT -= dt;
+      if (this.raceEndT <= 0) this.endRace();
+    }
+  }
+
+  private renderRace(dt: number, time: number, night: number): void {
+    const race = this.race;
+    this.raceView.setBeacons(!race && !this.heat.active && this.state !== "title", time);
+    this.raceView.update(this.state === "drive" ? dt : 0);
+    if (!race) {
+      this.raceView.setGates(null, 0, false, 0, 0, time);
+      return;
+    }
+    const pl = race.player;
+    this.raceView.setGates(race.route, pl.passed % race.gatesPerLap, pl.lap === race.def.laps, race.totalGates, pl.passed, time);
+    this.rivalViews.update(
+      race.racers.filter((r) => r.phys).map((r) => ({ x: r.phys!.x, y: r.phys!.y, z: r.phys!.z, heading: r.phys!.heading, pitch: r.phys!.pitch, steer: r.phys!.steer, spin: r.phys!.wheelSpin, braking: r.ctl.brake > 0 })),
+      night > 0.3,
+    );
+  }
+
+  private raceHud() {
+    const race = this.race;
+    if (!race) return null;
+    const pl = race.player;
+    const g = race.nextGate(pl);
+    return {
+      name: race.def.name,
+      position: race.positionOf(pl, this.car.x, this.car.z),
+      racers: race.racers.length,
+      lap: pl.lap,
+      laps: race.def.laps,
+      time: race.time,
+      best: this.save.races[race.def.id]?.best ?? 0,
+      gx: g.x,
+      gz: g.z,
+      gate: pl.passed + 1,
+      gates: race.totalGates,
+      wrongWay: race.wrongWay > 1.6,
+      rivals: race.racers.filter((r) => r.phys).map((r) => ({ x: r.phys!.x, z: r.phys!.z })),
+      route: this.routeSamples(race),
+    };
+  }
+
+  private routeCache: { id: string; pts: { x: number; z: number }[] } | null = null;
+  private routeSamples(race: Race): { x: number; z: number }[] {
+    if (this.routeCache?.id === race.def.id) return this.routeCache.pts;
+    const L = race.route.line;
+    const pts: { x: number; z: number }[] = [];
+    for (let s = 0; s <= L.length; s += 12) pts.push(L.sample(s));
+    this.routeCache = { id: race.def.id, pts };
+    return pts;
+  }
+
+  private onSpeedResult(r: { def: { id: string; name: string; kind: string; targets: [number, number, number] }; kmh: number; medal: string }): void {
+    const best = this.save.speed[r.def.id] ?? 0;
+    const record = r.kmh > best;
+    if (record) this.save.speed[r.def.id] = r.kmh;
+    const medal = r.medal as "gold" | "silver" | "bronze" | "none";
+    this.hud.popup(`${Math.round(r.kmh)} km/h`, `${r.def.kind === "camera" ? "SPEED CAMERA" : "SPEED TRAP"} \u00b7 ${medal === "none" ? `bronze at ${r.def.targets[0]}` : medal.toUpperCase()}${record ? " \u00b7 NEW RECORD" : ""}`, medal);
+    if (r.def.kind === "camera") {
+      const e = this.speedEvents.events.find((x) => x.def.id === r.def.id)!;
+      this.raceView.flashAt(e.a.x - e.a.tz * (e.a.hw + 1), e.a.y, e.a.z + e.a.tx * (e.a.hw + 1));
+      this.audio.blip(1760, 0.08);
+      // Speed cameras are seen by the police: a big speeding offence.
+      if (r.kmh > 160 && !this.race) this.onHeat(this.heat.offence("speeding", this.police.enabled));
+    } else this.audio.sting(medal === "gold" ? "escaped" : "alert");
+    if (record) this.persist();
+  }
+
+  private stepNearMiss(dt: number): void {
+    const cars = this.traffic.cars.map((c) => ({ id: c.id, x: c.x, z: c.z, heading: c.heading, v: c.v, length: c.model.length, width: c.model.width }));
+    const car = this.car;
+    for (const nm of this.nearMiss.update(dt, car.x, car.z, car.heading, car.speed, car.def.body.length, car.def.body.width, cars)) {
+      car.nitro = Math.min(1, car.nitro + nm.nitro);
+      this.hud.popup(nm.chain > 1 ? `NEAR MISS x${nm.chain}` : "NEAR MISS", `+${Math.round(nm.nitro * 100)}% nitro`, "nitro");
+      this.audio.blip(1320, 0.05);
+      this.nearMisses++;
+    }
+  }
+
+  nearMisses = 0;
+  /** Times the player brushed past traffic (tests). */
+  rubs = 0;
+
+  /** Race starts + speed events for the maps. */
+  private mapMarkers(): MapMarker[] {
+    const m: MapMarker[] = this.raceStarts.map((s) => ({ x: s.x, z: s.z, kind: "race" as const, label: s.def.name }));
+    for (const e of this.speedEvents.events) m.push({ x: e.a.x, z: e.a.z, kind: e.def.kind === "camera" ? "camera" : "trap", label: e.def.name });
+    return m;
+  }
+
   private playerState() {
     const car = this.car;
-    return { x: car.x, z: car.z, vx: car.vx, vz: car.vz, heading: car.heading, radius: car.radius, length: car.def.body.length };
+    return { x: car.x, z: car.z, vx: car.vx, vz: car.vz, heading: car.heading, radius: car.radius, length: car.def.body.length, width: car.def.body.width };
   }
 
   /** Steps traffic AI once per frame (collisions are handled per physics sub-step). */
@@ -1376,8 +1768,23 @@ export class Game {
     this.applyTrafficHits(ev);
   }
 
-  private applyTrafficHits(ev: { hits: { car: { x: number; z: number }; impact: number; x: number; z: number }[]; horns: { car: { x: number; z: number }; long: boolean }[] }): void {
+  private applyTrafficHits(ev: TrafficEvents): void {
     const car = this.car;
+    // Rubs: slide past the traffic car - push out of the overlap and drop
+    // only the velocity that drives into it. No crash effects.
+    for (const r of ev.rubs) {
+      this.rubs++;
+      this.nearMiss.touched(r.car.id);
+      car.x += r.nx * r.depth;
+      car.z += r.nz * r.depth;
+      const vn = car.vx * r.nx + car.vz * r.nz;
+      const tv = Math.sin(r.car.heading) * r.car.v * r.nx + Math.cos(r.car.heading) * r.car.v * r.nz;
+      if (vn < tv) {
+        car.vx += (tv - vn) * r.nx;
+        car.vz += (tv - vn) * r.nz;
+      }
+      this.rubTime = 0.15;
+    }
     for (const h of ev.hits) {
       // The player's car loses some speed and gets nudged away.
       const s = clamp(h.impact / 25, 0, 1);
@@ -1405,6 +1812,7 @@ export class Game {
           this.effects.sparks.emit(h.x, car.y + 0.5 + Math.random() * 0.4, h.z, (Math.random() - 0.5) * 8, Math.random() * 4 + 1, (Math.random() - 0.5) * 8, 0.3 + Math.random() * 0.3, 0.13, -0.1, 1, 0.8, 0.4);
         }
         this.trafficHits++;
+        this.nearMiss.touched((h.car as { id: number }).id);
         if (this.drift.points > 0 && h.impact > 7) this.drift.reset();
         if (h.impact > 4) this.offence("rammed-car");
       }
@@ -1488,6 +1896,13 @@ export class Game {
       audioLevel: this.audio.level(),
       gearRaw: c.gear,
       district: this.city.districtOf(c.x, c.z),
+      race: this.race ? this.race.snapshot(c.x, c.z) : null,
+      rain: this.weather.rain,
+      wet: this.weather.wetness,
+      nearMisses: this.nearMisses,
+      rubs: this.rubs,
+      controlsCard: !!this.controlsCard,
+      raceHere: this.raceHere()?.def.id ?? null,
       heatState: this.heat.state,
       heat: this.heat.heat,
       bounty: this.heat.bounty,

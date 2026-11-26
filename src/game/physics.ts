@@ -89,6 +89,8 @@ export class CarPhysics {
   wheelSpin = 0;
   /** Player steering sensitivity multiplier (Settings: 0.6 - 1.6). */
   sensitivity = 1;
+  /** Road wetness 0..1 (rain): less grip, longer braking, easier slides. */
+  wet = 0;
   /** Simulated engine for the HUD and sound. */
   rpm = 0;
   gear = 1;
@@ -209,7 +211,7 @@ export class CarPhysics {
       this.braking = false;
       this.reversing = false;
       if (c.brake > 0 && vLong > 0.5) {
-        a -= h.brake * c.brake;
+        a -= h.brake * c.brake * (1 - 0.22 * this.wet);
         this.braking = true;
       } else if (c.brake > 0) {
         // Reverse up to ~35 km/h.
@@ -266,7 +268,7 @@ export class CarPhysics {
         const auth = clamp(speed / 18, 0.3, 1);
         targetYaw = this.steer * 1.7 * auth;
       } else {
-        const limit = h.cornering / Math.max(Math.abs(vLong), 4);
+        const limit = (h.cornering * (1 - 0.2 * this.wet)) / Math.max(Math.abs(vLong), 4);
         targetYaw = clamp(targetYaw, -limit, limit);
         // A loose rear under full power rotates the car past the grip limit.
         if (h.drive === "RWD" && c.throttle >= 1 && Math.abs(this.steer) > 0.5) targetYaw *= 1 + feel.rear * 0.35;
@@ -275,7 +277,7 @@ export class CarPhysics {
       this.yawRate = damp(this.yawRate, targetYaw, response, dt);
 
       // ---- lateral grip ----------------------------------------------------
-      let grip = this.drifting ? h.driftGrip : h.grip;
+      let grip = (this.drifting ? h.driftGrip : h.grip) * (1 - 0.25 * this.wet);
       // Power oversteer: on a loose-rear (rear-drive) car, full throttle while
       // cornering overwhelms the rear tyres and lets the tail step out.
       if (!this.drifting && h.drive === "RWD" && c.throttle >= 1) {
@@ -311,7 +313,7 @@ export class CarPhysics {
       const needed = vLong * this.yawRate * dt;
       // Power oversteer / handbrake / off-road all reduce `grip`, and with it
       // how much cornering force the rear tyres can supply.
-      const holdLimit = (grip / h.grip) * h.cornering * 1.25 * dt;
+      const holdLimit = (grip / (h.grip * (1 - 0.25 * this.wet))) * h.cornering * (1 - 0.2 * this.wet) * 1.25 * dt;
       const held = clamp(needed, -holdLimit, holdLimit);
       let rel = rel0 - held * (this.drifting ? 0.15 : 1);
       // 2) Remaining slip decays at the grip rate.

@@ -9,6 +9,7 @@
  */
 
 import * as THREE from "three";
+import { mergeGeometries } from "three/examples/jsm/utils/BufferGeometryUtils.js";
 import type { BodySpec, CarDef } from "../game/cars";
 import { clamp, lerp, smoothstep } from "../core/math";
 import { grilleTex, headlightTex, plateTex, rimFace, seam, taillightTex, tread, tyreWall } from "./carDetails";
@@ -956,6 +957,98 @@ export function buildCar(def: CarDef, color: string, opts: BuildOptions = {}): C
       reverseMat.dispose();
     },
   };
+}
+
+/**
+ * Merges a built car's static body into one mesh per material (wheels kept
+ * as separate groups so they can still turn). A detailed car is ~150 meshes;
+ * merged it is ~20 draw calls. Used for parked cars and race rivals, whose
+ * paint never changes.
+ */
+export function mergeCarBody(v: CarVisual, opts: { staticWheels?: boolean } = {}): void {
+  const body = v.body;
+  body.updateMatrixWorld(true);
+  const inv = new THREE.Matrix4().copy(body.matrixWorld).invert();
+  const rel = new THREE.Matrix4();
+  const lists = new Map<THREE.Material, THREE.BufferGeometry[]>();
+  const meshes: THREE.Mesh[] = [];
+  body.traverse((o) => {
+    if (o instanceof THREE.Mesh) meshes.push(o);
+  });
+  for (const o of meshes) {
+    rel.multiplyMatrices(inv, o.matrixWorld);
+    const src = o.geometry.index ? o.geometry.toNonIndexed() : o.geometry.clone();
+    if (!src.getAttribute("normal")) src.computeVertexNormals();
+    if (!src.getAttribute("uv")) src.setAttribute("uv", new THREE.Float32BufferAttribute(new Float32Array(src.getAttribute("position").count * 2), 2));
+    for (const name of Object.keys(src.attributes)) if (name !== "position" && name !== "normal" && name !== "uv") src.deleteAttribute(name);
+    src.applyMatrix4(rel);
+    if (rel.determinant() < 0) {
+      for (const name of ["position", "normal", "uv"]) {
+        const a = src.getAttribute(name) as THREE.BufferAttribute;
+        const arr = a.array as Float32Array;
+        const n = a.itemSize;
+        for (let i = 0; i < a.count; i += 3) {
+          for (let k = 0; k < n; k++) {
+            const t = arr[(i + 1) * n + k];
+            arr[(i + 1) * n + k] = arr[(i + 2) * n + k];
+            arr[(i + 2) * n + k] = t;
+          }
+        }
+      }
+    }
+    const mats = Array.isArray(o.material) ? o.material : [o.material];
+    const groups = src.groups.length ? src.groups : [{ start: 0, count: src.getAttribute("position").count, materialIndex: 0 }];
+    for (const grp of groups) {
+      const mat = mats[grp.materialIndex ?? 0];
+      if (!mat) continue;
+      const part = new THREE.BufferGeometry();
+      for (const name of ["position", "normal", "uv"]) {
+        const a = src.getAttribute(name) as THREE.BufferAttribute;
+        part.setAttribute(name, new THREE.BufferAttribute((a.array as Float32Array).slice(grp.start * a.itemSize, (grp.start + grp.count) * a.itemSize), a.itemSize));
+      }
+      let list = lists.get(mat);
+      if (!list) lists.set(mat, (list = []));
+      list.push(part);
+    }
+    o.parent?.remove(o);
+  }
+  for (const [mat, list] of lists) {
+    const g = mergeGeometries(list, false);
+    if (!g) continue;
+    const mesh = new THREE.Mesh(g, mat);
+    mesh.castShadow = true;
+    body.add(mesh);
+  }
+  // Wheels: all four into one mesh per material, parented to the root (they
+  // no longer spin or steer - fine for parked cars). Saves ~40 draw calls.
+  if (opts.staticWheels) {
+    const wl = new Map<THREE.Material, THREE.BufferGeometry[]>();
+    const rootInv = new THREE.Matrix4().copy(v.root.matrixWorld).invert();
+    v.root.updateMatrixWorld(true);
+    for (const w of v.wheels) {
+      const ws: THREE.Mesh[] = [];
+      w.pivot.traverse((o) => {
+        if (o instanceof THREE.Mesh) ws.push(o);
+      });
+      for (const o of ws) {
+        rel.multiplyMatrices(rootInv, o.matrixWorld);
+        const src = o.geometry.index ? o.geometry.toNonIndexed() : o.geometry.clone();
+        if (!src.getAttribute("uv")) src.setAttribute("uv", new THREE.Float32BufferAttribute(new Float32Array(src.getAttribute("position").count * 2), 2));
+        for (const name of Object.keys(src.attributes)) if (name !== "position" && name !== "normal" && name !== "uv") src.deleteAttribute(name);
+        src.applyMatrix4(rel);
+        const mat = o.material as THREE.Material;
+        let list = wl.get(mat);
+        if (!list) wl.set(mat, (list = []));
+        list.push(src);
+      }
+      w.pivot.parent?.remove(w.pivot);
+    }
+    for (const [mat, list] of wl) {
+      const g = mergeGeometries(list, false);
+      if (g) v.root.add(new THREE.Mesh(g, mat));
+    }
+    v.wheels.length = 0;
+  }
 }
 
 /** Updates wheels, body roll / pitch and lights from the physics state. */

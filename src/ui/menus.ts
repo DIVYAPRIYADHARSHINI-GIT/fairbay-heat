@@ -157,6 +157,8 @@ export class MenuScreen {
   }
 }
 
+import { keyName, type Bindings } from "../core/input";
+
 export const CONTROLS: [string, string][] = [
   ["W / ↑", "Accelerate"],
   ["S / ↓", "Brake · Reverse"],
@@ -175,12 +177,32 @@ export const CONTROLS: [string, string][] = [
   ["Esc / P", "Pause"],
 ];
 
-export function controlsTable(): HTMLElement {
+/** Controls grid; with `b` it shows the player's (possibly remapped) keys. */
+export function controlsTable(b?: Bindings): HTMLElement {
   const t = el("div", "controls-grid");
-  for (const [k, v] of CONTROLS) {
-    const keys = el("div", "ck");
-    for (const part of k.split(" / ")) keys.appendChild(el("kbd", "", part));
-    t.append(keys, el("div", "cv", v));
+  const rows: [string[], string][] = b
+    ? [
+        [[...b.accelerate], "Accelerate"],
+        [[...b.brake], "Brake \u00b7 Reverse"],
+        [[...b.left, ...b.right], "Steer"],
+        [b.handbrake, "Handbrake (drift)"],
+        [b.nitro.slice(0, 1), "Nitro"],
+        [b.jack, "Jack a car \u00b7 Start a race"],
+        [b.garage, "Garage (switch car / paint)"],
+        [b.camera, "Change camera"],
+        [b.map, "City map"],
+        [b.reset, "Reset car to road / checkpoint"],
+        [b.time, "Skip time (+3 h)"],
+        [b.mute, "Mute"],
+        [b.fps, "FPS counter"],
+        [b.help, "Controls"],
+        [b.pause, "Pause"],
+      ].map(([codes, label]) => [(codes as string[]).map(keyName), label as string])
+    : CONTROLS.map(([k, v]) => [k.split(" / "), v]);
+  for (const [keys, v] of rows) {
+    const cell = el("div", "ck");
+    for (const part of keys) cell.appendChild(el("kbd", "", part));
+    t.append(cell, el("div", "cv", v));
   }
   return t;
 }

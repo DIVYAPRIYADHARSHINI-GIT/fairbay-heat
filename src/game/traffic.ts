@@ -29,6 +29,7 @@
 import { clamp, mulberry32 } from "../core/math";
 import { signalState, type LaneSeg, type RoadNetwork, type RNode } from "./roads";
 import type { CircleCollider } from "./collision";
+import { RUB_SPEED, boxContact, footprint } from "./contact";
 
 // ---- IDM parameters --------------------------------------------------------
 
@@ -144,11 +145,19 @@ export interface PlayerState {
   heading: number;
   radius: number;
   length: number;
+  /** Body width (m); defaults to about twice the radius. */
+  width?: number;
 }
 
 export interface TrafficEvents {
-  /** Cars the player just hit: id and impact speed. */
+  /** Cars the player just crashed into: impact (closing) speed and contact point. */
   hits: { car: TrafficCar; impact: number; x: number; z: number }[];
+  /**
+   * Cars the player is brushing past (closing slower than RUB_SPEED): the
+   * normal points from the traffic car to the player, `depth` is the overlap
+   * the caller must push the player out by.
+   */
+  rubs: { car: TrafficCar; nx: number; nz: number; depth: number; rel: number; x: number; z: number }[];
   horns: { car: TrafficCar; long: boolean }[];
 }
 
@@ -529,7 +538,7 @@ export class Traffic {
   }
 
   step(dt: number, player: PlayerState | null, focusX: number, focusZ: number, focusHeading: number | null): TrafficEvents {
-    const ev: TrafficEvents = { hits: [], horns: [] };
+    const ev: TrafficEvents = { hits: [], rubs: [], horns: [] };
     this.time += dt;
     if (!this.enabled) return ev;
 
@@ -697,7 +706,7 @@ export class Traffic {
    * the game, so a fast car cannot pass through a traffic car between frames.
    */
   collide(p: PlayerState): TrafficEvents {
-    const ev: TrafficEvents = { hits: [], horns: [] };
+    const ev: TrafficEvents = { hits: [], rubs: [], horns: [] };
     if (this.enabled) this.collidePlayer(p, ev);
     return ev;
   }
@@ -713,10 +722,19 @@ export class Traffic {
       if (!hit) continue;
       const cvx = car.wrecked > 0 ? car.wvx : Math.sin(car.heading) * car.v;
       const cvz = car.wrecked > 0 ? car.wvz : Math.cos(car.heading) * car.v;
+      // Closing speed along the contact normal (> 0 = moving into each other).
       const rel = (p.vx - cvx) * hit.nx + (p.vz - cvz) * hit.nz;
-      const impact = Math.abs(rel);
+      const impact = Math.max(0, rel);
+      if (car.wrecked <= 0 && impact < RUB_SPEED) {
+        // A RUB: brushing past side by side. The traffic car stays in its
+        // lane (its driver lifts off a little); the caller only separates
+        // the player's car - no crash, no horn blast, no sparks.
+        car.v *= 0.97;
+        ev.rubs.push({ car, nx: -hit.nx, nz: -hit.nz, depth: hit.depth, rel: impact, x: hit.cx, z: hit.cz });
+        continue;
+      }
       if (impact < 1.2 && car.wrecked > 0) continue;
-      // Knock the traffic car away (player car is much heavier in arcade terms).
+      // A CRASH: knock the traffic car away (the player car is much heavier in arcade terms).
       if (car.wrecked <= 0) {
         car.wrecked = 6;
         car.wvx = cvx;
@@ -735,28 +753,16 @@ export class Traffic {
     }
   }
 
-  private circleHit(car: TrafficCar, p: PlayerState): { nx: number; nz: number; cx: number; cz: number } | null {
-    const fx = Math.sin(car.heading);
-    const fz = Math.cos(car.heading);
-    const r = car.model.width / 2;
-    const off = Math.max(0, car.model.length / 2 - r);
-    const pfx = Math.sin(p.heading);
-    const pfz = Math.cos(p.heading);
-    const poff = Math.max(0, p.length / 2 - p.radius);
-    let best: { nx: number; nz: number; cx: number; cz: number; d: number } | null = null;
-    for (const a of [-off, 0, off]) {
-      const ax = car.x + fx * a;
-      const az = car.z + fz * a;
-      for (const b of [-poff, 0, poff]) {
-        const bx = p.x + pfx * b;
-        const bz = p.z + pfz * b;
-        const dx = ax - bx;
-        const dz = az - bz;
-        const d = Math.hypot(dx, dz);
-        if (d < r + p.radius && (!best || d < best.d)) best = { nx: d > 1e-6 ? dx / d : 1, nz: d > 1e-6 ? dz / d : 0, cx: (ax + bx) / 2, cz: (az + bz) / 2, d };
-      }
-    }
-    return best;
+  /**
+   * Contact between a traffic car and the player (oriented-box footprints).
+   * The normal points from the player to the traffic car.
+   */
+  private circleHit(car: TrafficCar, p: PlayerState): { nx: number; nz: number; cx: number; cz: number; depth: number } | null {
+    const fp = footprint(p.length, p.width ?? p.radius * 2.08);
+    const fc = footprint(car.model.length, car.model.width);
+    const hit = boxContact(p.x, p.z, p.heading, fp.hl, fp.hw, car.x, car.z, car.heading, fc.hl, fc.hw);
+    if (!hit) return null;
+    return { nx: hit.nx, nz: hit.nz, cx: hit.x, cz: hit.z, depth: hit.depth };
   }
 
   /** Keeps the population near the focus point. */

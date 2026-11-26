@@ -16,6 +16,7 @@
  */
 
 import * as THREE from "three";
+import { mergeGeometries } from "three/examples/jsm/utils/BufferGeometryUtils.js";
 import { mulberry32, pick, range } from "../core/math";
 import { obbCorners } from "../core/geom";
 import type { CircleCollider } from "../game/collision";
@@ -94,12 +95,18 @@ type Mat =
   | "ramp"
   | "rampSide"
   | "bridge"
-  | "plaza";
+  | "plaza"
+  | "trim"
+  | "shopfront"
+  | "awning"
+  | "hvac";
 
 export interface WorldView {
   group: THREE.Group;
   water: THREE.Mesh[];
   setNight(n: number): void;
+  /** Rain-wet surfaces: darker and glossier (0 dry .. 1 soaked). */
+  setWet(w: number): void;
   update(time: number, signalTime: number): void;
   breakLamp(c: CircleCollider): void;
   resetLamps(): void;
@@ -133,6 +140,9 @@ export function buildWorldView(world: World, maxAniso: number): WorldView {
     });
   }
   const asphaltTex = tex(T.asphalt());
+  const shop = T.shopfront();
+  for (const t of [shop.map, shop.emissive]) tex(t);
+  const shopMat = new THREE.MeshStandardMaterial({ map: shop.map, emissiveMap: shop.emissive, emissive: new THREE.Color(1, 1, 1), emissiveIntensity: 0, vertexColors: true, roughness: 0.25, metalness: 0.3 });
   const mats: Record<Exclude<Mat, BuildingStyle>, THREE.Material> = {
     roof: new THREE.MeshStandardMaterial({ map: tex(T.roofTex()), vertexColors: true, roughness: 0.95 }),
     shingle: new THREE.MeshStandardMaterial({ map: tex(T.shingles()), vertexColors: true, roughness: 0.85 }),
@@ -145,6 +155,13 @@ export function buildWorldView(world: World, maxAniso: number): WorldView {
     rampSide: new THREE.MeshStandardMaterial({ map: tex(T.hazardStripes()), vertexColors: true, roughness: 0.7 }),
     bridge: new THREE.MeshStandardMaterial({ map: tex(T.concrete()), vertexColors: true, roughness: 0.8 }),
     plaza: new THREE.MeshStandardMaterial({ map: tex(T.sidewalk()), vertexColors: true, roughness: 0.85 }),
+    // Facade detail: ledges, cornices, pilasters and mullions (vertex-tinted).
+    trim: new THREE.MeshStandardMaterial({ map: tex(T.concrete()), vertexColors: true, roughness: 0.75 }),
+    // Ground-floor shop windows with lit displays at night.
+    shopfront: shopMat,
+    awning: new THREE.MeshStandardMaterial({ map: tex(T.awningStripes()), vertexColors: true, roughness: 0.8, side: THREE.DoubleSide }),
+    // Rooftop plant: AC units, vents, water tanks.
+    hvac: new THREE.MeshStandardMaterial({ map: tex(T.hvacTex()), vertexColors: true, roughness: 0.55, metalness: 0.5 }),
   };
   const material = (k: Mat): THREE.Material => (styles.includes(k as BuildingStyle) ? facadeMats[k as BuildingStyle] : mats[k as Exclude<Mat, BuildingStyle>]);
 
@@ -167,6 +184,8 @@ export function buildWorldView(world: World, maxAniso: number): WorldView {
   const roofTints = ["#8a8a8a", "#9a948a", "#7e8388", "#a19a8e"];
   const shingleTints = ["#8b3a2b", "#5a5f66", "#6b4a3a", "#3f4a55", "#9c5a3c"];
   for (const b of world.buildings) buildBuilding(b, facades[b.style], geo, rng, roofTints, shingleTints);
+  const drng = mulberry32(world.seed + 7);
+  for (const b of world.buildings) buildDetails(b, facades[b.style], geo, drng, world);
 
   // ---- ramps ---------------------------------------------------------------------
   for (const r of world.ramps) {
@@ -190,7 +209,7 @@ export function buildWorldView(world: World, maxAniso: number): WorldView {
     for (const [k, g] of m) {
       if (g.count === 0) continue;
       const mesh = new THREE.Mesh(g.build(), material(k));
-      const big = styles.includes(k as BuildingStyle) || k === "roof" || k === "shingle" || k === "ramp" || k === "rampSide" || k === "bridge";
+      const big = styles.includes(k as BuildingStyle) || k === "roof" || k === "shingle" || k === "ramp" || k === "rampSide" || k === "bridge" || k === "hvac";
       mesh.castShadow = big;
       mesh.receiveShadow = true;
       mesh.matrixAutoUpdate = false;
@@ -222,12 +241,27 @@ export function buildWorldView(world: World, maxAniso: number): WorldView {
     water,
     setNight(n: number) {
       for (const m of emissiveMats) m.emissiveIntensity = n * 1.1;
+      shopMat.emissiveIntensity = 0.15 + n * 1.25;
       lamps.setNight(n);
       signals.setNight(n);
     },
     update(time: number, signalTime: number) {
       waterNormals.offset.set(time * 0.004, time * 0.01);
       signals.update(signalTime);
+    },
+    setWet(w: number) {
+      // Asphalt: much glossier and darker when wet (wet roads mirror the
+      // sky and lights); pavements and kerbs a bit; roofs slightly.
+      const a = mats.asphalt as THREE.MeshStandardMaterial;
+      a.roughness = 0.88 - 0.62 * w;
+      a.color.setScalar(0.69 * (1 - 0.32 * w));
+      a.envMapIntensity = 1 + 1.4 * w;
+      for (const k of ["sidewalk", "plaza", "curb", "concrete", "bridge"] as const) {
+        const m = mats[k] as THREE.MeshStandardMaterial;
+        m.roughness = 0.88 - 0.4 * w;
+        m.color.setScalar(1 - 0.22 * w);
+      }
+      (mats.roof as THREE.MeshStandardMaterial).roughness = 0.95 - 0.35 * w;
     },
     breakLamp: lamps.breakLamp,
     resetLamps: lamps.reset,
@@ -603,6 +637,177 @@ function boxObbRing(G: Geo, cx: number, cz: number, hx: number, hz: number, ang:
   edge(-hx + th / 2, 0, th / 2, hz);
 }
 
+/**
+ * Facade detailing on top of the textured walls, merged into the same
+ * chunks (so it costs a few draw calls per district, not per building):
+ *  - floor ledges / string courses that stick out 12-25 cm and catch the
+ *    light, plus a heavier cornice at the top of each tier;
+ *  - pilasters at the corners (and vertical fins on glass towers);
+ *  - ground-floor SHOPFRONTS on the street side of city blocks (glass
+ *    windows lit at night, a fascia sign band and an awning on some);
+ *  - houses get a porch roof over the door, a chimney and window sills;
+ *  - rooftop plant: AC units with fans, vents and water tanks.
+ */
+function buildDetails(b: Building, f: T.Facade, g: (x: number, z: number, k: Mat) => Geo, rng: () => number, world: World): void {
+  const box = b.box;
+  const ang = Math.atan2(box.s, box.c);
+  const c = Math.cos(ang);
+  const s = Math.sin(ang);
+  const P = (u: number, v: number) => [box.cx + u * c - v * s, box.cz + u * s + v * c];
+  const TR = g(box.cx, box.cz, "trim");
+  const base = new THREE.Color(b.color);
+  const trimCol = b.style === "glass" ? new THREE.Color("#9aa3ab") : b.style === "brick" ? new THREE.Color("#e4dccb") : base.clone().multiplyScalar(0.82);
+  const city = b.style === "glass" || b.style === "office" || b.style === "brick";
+
+  /** A band of thickness `th` (outwards) and height `bh` around tier footprint at height y. */
+  const band = (hx: number, hz: number, y: number, bh: number, th: number, col: THREE.Color) => {
+    boxObbRing(TR, box.cx, box.cz, hx + th, hz + th, ang, y, y + bh, th + 0.05, col);
+  };
+
+  for (let ti = 0; ti < b.tiers.length; ti++) {
+    const t = b.tiers[ti];
+    const y0 = b.base + t.y0;
+    const y1 = b.base + t.y1;
+    if (city) {
+      // Floor ledges every few storeys, aligned with the window texture rows.
+      const step = b.style === "glass" ? f.tileH / 8 : (f.tileH / 8) * 2;
+      const startFloor = ti === 0 ? 1 : 0;
+      for (let y = Math.ceil((t.y0 + 0.01) / step) * step + startFloor * 0; y < t.y1 - 2; y += step) {
+        if (y < 3.2) continue;
+        band(t.hx, t.hz, b.base + y - 0.12, 0.18, b.style === "glass" ? 0.06 : 0.12, trimCol);
+        if (b.style === "glass" && (y / step) % 4 > 0.5) y += step * 2; // glass: only every few floors
+      }
+      // Cornice at the top of the tier.
+      band(t.hx, t.hz, y1 - 0.55, 0.55, 0.32, trimCol);
+      // Corner pilasters.
+      const pw = b.style === "glass" ? 0.35 : 0.55;
+      for (const [u, v] of [[t.hx, t.hz], [-t.hx, t.hz], [-t.hx, -t.hz], [t.hx, -t.hz]]) {
+        const [x, z] = P(u - Math.sign(u) * pw * 0.5, v - Math.sign(v) * pw * 0.5);
+        boxObb(TR, x, z, pw * 0.5 + 0.08, pw * 0.5 + 0.08, ang, y0, y1 - 0.55, trimCol);
+      }
+      // Glass towers: thin vertical fins every bay on the long faces.
+      if (b.style === "glass" && t.hx > 8) {
+        const bay = f.tileW / 8;
+        for (let u = -t.hx + bay; u < t.hx - bay * 0.5; u += bay * 2) {
+          for (const v of [t.hz, -t.hz]) {
+            const [x, z] = P(u, v + Math.sign(v) * 0.12);
+            boxObb(TR, x, z, 0.06, 0.12, ang, y0 + 4, y1 - 0.6, trimCol);
+          }
+        }
+      }
+    }
+  }
+
+  // ---- ground-floor shopfronts on the face towards the street ----
+  const t0 = b.tiers[0];
+  // Which side (+v or -v) faces the nearest road? Buildings on the left of a
+  // street have their front on +v, on the right on -v.
+  const near = world.net.nearestRoad(box.cx, box.cz, 80);
+  let vs = -1;
+  if (near) {
+    const rp = near.road.center.sample(near.s);
+    vs = (rp.x - box.cx) * -s + (rp.z - box.cz) * c >= 0 ? 1 : -1;
+  }
+  // Frame where the street face is "-v": flip v (and keep faces outward).
+  const PS = (u: number, v: number) => P(u * -vs, v * -vs);
+  if (city && b.district !== "ironworks" && b.district !== "port" && t0.hx > 5) {
+    const SH = g(box.cx, box.cz, "shopfront");
+    const front = -t0.hz - 0.04; // just proud of the wall
+    const y0 = b.base + 0.2;
+    const sh = Math.min(4.2, (t0.y1 - t0.y0) * 0.35);
+    const nb = Math.max(1, Math.round((t0.hx * 2) / 7));
+    const bw = (t0.hx * 2) / nb;
+    for (let i = 0; i < nb; i++) {
+      const u0 = -t0.hx + i * bw + 0.45;
+      const u1 = -t0.hx + (i + 1) * bw - 0.45;
+      const [ax, az] = PS(u0, front);
+      const [bx, bz] = PS(u1, front);
+      // Outward normal of the street face.
+      const nX = s * -vs;
+      const nZ = -c * -vs;
+      // Shop window (texture: glazing + displays; lit at night).
+      const tint = new THREE.Color().setHSL(rng(), 0.25, 0.85);
+      SH.face([[bx, y0, bz], [ax, y0, az], [ax, y0 + sh * 0.78, az], [bx, y0 + sh * 0.78, bz]], [nX, 0, nZ], [[(i % 4) * 0.25 + 0.25, 0], [(i % 4) * 0.25, 0], [(i % 4) * 0.25, 1], [(i % 4) * 0.25 + 0.25, 1]], tint);
+      // Fascia (sign band) above the window, standing proud.
+      const signCol = new THREE.Color().setHSL(rng(), 0.55, 0.35 + rng() * 0.2);
+      const [fx0, fz0] = PS((u0 + u1) / 2, front - 0.08);
+      boxObb(TR, fx0, fz0, (u1 - u0) / 2 + 0.2, 0.1, ang, y0 + sh * 0.8, y0 + sh, signCol);
+      // Awning over some shops (oldtown / midtown / brick).
+      if ((b.style === "brick" || b.district === "oldtown" || b.district === "midtown") && rng() < 0.55) {
+        const AW = g(box.cx, box.cz, "awning");
+        const depth = 1.4;
+        const yTop = y0 + sh * 0.8;
+        const yLow = yTop - 0.75;
+        const [cx0, cz0] = PS(u0, front);
+        const [cx1, cz1] = PS(u1, front);
+        const [ox0, oz0] = PS(u0, front - depth);
+        const [ox1, oz1] = PS(u1, front - depth);
+        const col = new THREE.Color().setHSL([0, 0.33, 0.58, 0.08, 0.95][Math.floor(rng() * 5)], 0.55, 0.42);
+        const n = new THREE.Vector3(nX * 0.75, 1, nZ * 0.75).normalize();
+        AW.face([[cx1, yTop, cz1], [cx0, yTop, cz0], [ox0, yLow, oz0], [ox1, yLow, oz1]], [n.x, n.y, n.z], [[0, 0], [(u1 - u0) / 1.2, 0], [(u1 - u0) / 1.2, 1], [0, 1]], col);
+        // Valance (the hanging front edge).
+        AW.face([[ox1, yLow, oz1], [ox0, yLow, oz0], [ox0, yLow - 0.28, oz0], [ox1, yLow - 0.28, oz1]], [nX, 0, nZ], [[0, 0.9], [(u1 - u0) / 1.2, 0.9], [(u1 - u0) / 1.2, 1], [0, 1]], col);
+      }
+    }
+  }
+
+  // ---- houses: porch roof, chimney, window sills ----
+  if (b.style === "house") {
+    const t = b.tiers[0];
+    const y = b.base + 2.6;
+    const [px, pz] = PS(rng() < 0.5 ? -t.hx * 0.4 : t.hx * 0.4, -t.hz - 0.9);
+    boxObb(TR, px, pz, 1.6, 0.9, ang, y, y + 0.14, new THREE.Color("#6f6a64"));
+    // Porch posts.
+    for (const du of [-1.45, 1.45]) {
+      const lu = ((px - box.cx) * c + (pz - box.cz) * s) * -vs + du;
+      const [qx, qz] = PS(lu, -t.hz - 1.7);
+      boxObb(TR, qx, qz, 0.08, 0.08, ang, b.base, y, new THREE.Color("#f2efe8"));
+    }
+    // Chimney through the roof.
+    const [chx, chz] = P(t.hx * 0.55, t.hz * 0.3);
+    boxObb(TR, chx, chz, 0.45, 0.45, ang, b.base + t.y1 - 0.5, b.base + t.y1 + 3.4, new THREE.Color("#8a5a48"));
+    // Window sills on the street face.
+    const nwin = Math.max(1, Math.floor((t.hx * 2) / 3.2));
+    for (let i = 0; i < nwin; i++) {
+      const u = -t.hx + (i + 0.5) * ((t.hx * 2) / nwin);
+      const [wx, wz] = PS(u, -t.hz - 0.08);
+      boxObb(TR, wx, wz, 0.75, 0.1, ang, b.base + 0.9, b.base + 1.0, new THREE.Color("#f5f3ee"));
+    }
+  }
+
+  // ---- rooftop plant (flat roofs) ----
+  if (!b.pitched) {
+    const H = g(box.cx, box.cz, "hvac");
+    const top = b.tiers[b.tiers.length - 1];
+    const yr = b.base + top.y1;
+    const nU = Math.min(6, Math.floor((top.hx * top.hz) / 60) + (b.style === "warehouse" ? 2 : 1));
+    for (let k = 0; k < nU; k++) {
+      const w = range(rng, 1.2, 2.2);
+      const d = range(rng, 1.0, 1.8);
+      const u = range(rng, -top.hx + w + 0.6, top.hx - w - 0.6);
+      const v = range(rng, -top.hz + d + 0.6, top.hz - d - 0.6);
+      if (!Number.isFinite(u) || !Number.isFinite(v) || top.hx < w + 1 || top.hz < d + 1) continue;
+      const [x, z] = P(u, v);
+      const gray = new THREE.Color().setScalar(range(rng, 0.7, 0.92));
+      boxObb(H, x, z, w / 2, d / 2, ang, yr, yr + range(rng, 0.9, 1.6), gray);
+    }
+    // Water tank on old brick / office roofs (New York style).
+    if ((b.style === "brick" || b.district === "oldtown") && top.hx > 6 && rng() < 0.45) {
+      const [x, z] = P(range(rng, -top.hx * 0.4, top.hx * 0.4), range(rng, -top.hz * 0.3, top.hz * 0.3));
+      for (const [dx, dz] of [[-0.9, -0.9], [0.9, -0.9], [-0.9, 0.9], [0.9, 0.9]]) {
+        const lx = x + dx * c - dz * s;
+        const lz = z + dx * s + dz * c;
+        boxObb(TR, lx, lz, 0.08, 0.08, ang, yr, yr + 2.2, new THREE.Color("#3d3a37"));
+      }
+      // Octagonal-ish barrel from stacked boxes rotated 45 degrees.
+      boxObb(TR, x, z, 1.25, 1.25, ang, yr + 2.2, yr + 4.8, new THREE.Color("#7a5b45"));
+      boxObb(TR, x, z, 1.25, 1.25, ang + Math.PI / 4, yr + 2.2, yr + 4.8, new THREE.Color("#7a5b45"));
+      boxObb(TR, x, z, 0.9, 0.9, ang + Math.PI / 8, yr + 4.8, yr + 5.5, new THREE.Color("#4b3a2e"));
+    }
+  }
+  void world;
+}
+
 // ---------------------------------------------------------------------------
 // Terrain + water
 // ---------------------------------------------------------------------------
@@ -837,6 +1042,18 @@ function buildLamps(world: World) {
   };
 }
 
+/**
+ * Trees, instanced. Broadleaf trees come in three shapes picked per tree:
+ *  - ROUND (oak / plane): a clump of 4 lumpy leaf masses on a trunk with
+ *    two visible branches;
+ *  - TALL (poplar / cypress style): a narrow stacked column;
+ *  - SPREADING (street maple): a wide, flat-bottomed canopy.
+ * Leaf masses are displaced icosahedra (no two lobes alike), each instance
+ * gets its own scale, lean and hue (including a few autumn-tinted ones), and
+ * the leaf shader darkens the underside / inner parts of the crown so it
+ * reads as volume instead of a flat blob. Conifers are layered with drooping
+ * tiers and get a rough bark trunk.
+ */
 function buildTrees(world: World): THREE.Group {
   const group = new THREE.Group();
   const rng = mulberry32(5);
@@ -844,73 +1061,163 @@ function buildTrees(world: World): THREE.Group {
   const q = new THREE.Quaternion();
   const c = new THREE.Color();
   const up = new THREE.Vector3(0, 1, 0);
-  // Broadleaf.
-  {
-    const n = Math.max(1, world.trees.length);
-    const trunkGeo = new THREE.CylinderGeometry(0.16, 0.26, 3, 6);
-    trunkGeo.translate(0, 1.5, 0);
-    const crownGeo = new THREE.IcosahedronGeometry(2.2, 1);
-    crownGeo.translate(0, 4.6, 0);
-    const crown2Geo = new THREE.IcosahedronGeometry(1.6, 1);
-    crown2Geo.translate(0.6, 6.0, -0.3);
-    const trunks = new THREE.InstancedMesh(trunkGeo, new THREE.MeshStandardMaterial({ color: 0x5a4030, roughness: 1 }), n);
-    const leafMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.9, flatShading: true });
-    const crowns = new THREE.InstancedMesh(crownGeo, leafMat, n);
-    const crowns2 = new THREE.InstancedMesh(crown2Geo, leafMat, n);
-    const palette = ["#3e6a26", "#4b7a2e", "#335a22", "#5a8231", "#466b25", "#64782a"];
-    world.trees.forEach((t, i) => {
-      q.setFromAxisAngle(up, t.rot);
-      m.compose(new THREE.Vector3(t.x, t.y, t.z), q, new THREE.Vector3(t.scale, t.scale * range(rng, 0.9, 1.2), t.scale));
+  const barkMat = new THREE.MeshStandardMaterial({ map: T.bark(), color: 0xffffff, roughness: 1 });
+  const leafMat = leafMaterial();
+
+  /** A lumpy leaf mass: icosahedron with noisy radius, as a merged-ready geometry. */
+  const lump = (r: number, seed: number, x: number, y: number, z: number, sy = 1): THREE.BufferGeometry => {
+    const geo = new THREE.IcosahedronGeometry(r, 1);
+    const p = geo.getAttribute("position") as THREE.BufferAttribute;
+    const lr = mulberry32(seed);
+    const cache = new Map<string, number>();
+    for (let i = 0; i < p.count; i++) {
+      const key = `${p.getX(i).toFixed(3)},${p.getY(i).toFixed(3)},${p.getZ(i).toFixed(3)}`;
+      let k = cache.get(key);
+      if (k === undefined) cache.set(key, (k = 0.82 + lr() * 0.32));
+      p.setXYZ(i, p.getX(i) * k, p.getY(i) * k * sy, p.getZ(i) * k);
+    }
+    geo.translate(x, y, z);
+    return geo.toNonIndexed();
+  };
+  const merge = (list: THREE.BufferGeometry[]) => {
+    const g = mergeGeometries(list.map((x) => (x.index ? x.toNonIndexed() : x)), false)!;
+    g.computeVertexNormals();
+    return g;
+  };
+  const branch = (x0: number, y0: number, z0: number, x1: number, y1: number, z1: number, r: number): THREE.BufferGeometry => {
+    const len = Math.hypot(x1 - x0, y1 - y0, z1 - z0);
+    const g = new THREE.CylinderGeometry(r * 0.6, r, len, 5);
+    g.translate(0, len / 2, 0);
+    const dir = new THREE.Vector3(x1 - x0, y1 - y0, z1 - z0).normalize();
+    g.applyQuaternion(new THREE.Quaternion().setFromUnitVectors(up, dir));
+    g.translate(x0, y0, z0);
+    return g;
+  };
+
+  // Species geometry: [trunk + branches, crown].
+  const species = [
+    {
+      trunk: merge([new THREE.CylinderGeometry(0.17, 0.3, 3.2, 7).translate(0, 1.6, 0), branch(0, 2.6, 0, 1.3, 4.0, 0.3, 0.12), branch(0, 2.9, 0, -1.1, 4.3, -0.5, 0.11)]),
+      crown: merge([lump(2.2, 1, 0, 4.9, 0), lump(1.7, 2, 1.4, 4.4, 0.4), lump(1.6, 3, -1.2, 4.7, -0.6), lump(1.5, 4, 0.2, 6.2, -0.2)]),
+    },
+    {
+      trunk: merge([new THREE.CylinderGeometry(0.13, 0.22, 2.4, 6).translate(0, 1.2, 0)]),
+      crown: merge([lump(1.3, 5, 0, 3.2, 0, 1.3), lump(1.15, 6, 0.1, 5.0, 0.05, 1.35), lump(0.95, 7, -0.05, 6.7, 0, 1.4), lump(0.6, 8, 0, 8.0, 0, 1.4)]),
+    },
+    {
+      trunk: merge([new THREE.CylinderGeometry(0.15, 0.26, 2.8, 7).translate(0, 1.4, 0), branch(0, 2.3, 0, 1.6, 3.4, 0.4, 0.1), branch(0, 2.4, 0, -1.5, 3.3, -0.4, 0.1), branch(0, 2.5, 0, 0.2, 3.6, 1.5, 0.09)]),
+      crown: merge([lump(1.8, 9, 1.4, 4.1, 0.3, 0.7), lump(1.8, 10, -1.4, 4.2, -0.3, 0.7), lump(1.7, 11, 0.1, 4.3, 1.3, 0.7), lump(1.6, 12, 0, 4.6, -1.2, 0.7), lump(1.5, 13, 0, 5.2, 0, 0.75)]),
+    },
+  ];
+  const palette = ["#3e6a26", "#4b7a2e", "#335a22", "#5a8231", "#466b25", "#64782a", "#557d35", "#3a6230"];
+  const autumn = ["#a8742c", "#b5532a", "#c79a2e"];
+  const bySpecies: (typeof world.trees)[] = [[], [], []];
+  const sp = new Map<(typeof world.trees)[number], number>();
+  for (const t of world.trees) {
+    // Street trees (small scale, on sidewalks) are mostly the spreading kind.
+    const r = rng();
+    const k = t.scale < 1.01 && t.y > 0 && r < 0.6 ? 2 : r < 0.62 ? 0 : r < 0.82 ? 1 : 2;
+    bySpecies[k].push(t);
+    sp.set(t, k);
+  }
+  species.forEach((spc, k) => {
+    const list = bySpecies[k];
+    const n = Math.max(1, list.length);
+    const trunks = new THREE.InstancedMesh(spc.trunk, barkMat, n);
+    const crowns = new THREE.InstancedMesh(spc.crown, leafMat, n);
+    list.forEach((t, i) => {
+      // A slight random lean so rows of trees are not identical.
+      const lean = new THREE.Quaternion().setFromEuler(new THREE.Euler((rng() - 0.5) * 0.1, t.rot, (rng() - 0.5) * 0.1));
+      q.copy(lean);
+      const sy = t.scale * range(rng, 0.9, 1.2);
+      m.compose(new THREE.Vector3(t.x, t.y, t.z), q, new THREE.Vector3(t.scale, sy, t.scale));
       trunks.setMatrixAt(i, m);
       crowns.setMatrixAt(i, m);
-      crowns2.setMatrixAt(i, m);
-      c.set(pick(rng, palette));
+      c.set(rng() < 0.05 ? pick(rng, autumn) : pick(rng, palette));
+      c.offsetHSL((rng() - 0.5) * 0.03, (rng() - 0.5) * 0.1, (rng() - 0.5) * 0.06);
       crowns.setColorAt(i, c);
-      crowns2.setColorAt(i, c.multiplyScalar(1.12));
     });
-    for (const im of [trunks, crowns, crowns2]) {
-      im.count = world.trees.length;
+    for (const im of [trunks, crowns]) {
+      im.count = list.length;
       im.castShadow = true;
       im.receiveShadow = true;
       im.computeBoundingSphere();
     }
-    group.add(trunks, crowns, crowns2);
-  }
-  // Conifers.
+    group.add(trunks, crowns);
+  });
+  void sp;
+  void q;
+
+  // Conifers: four drooping tiers, slightly offset, on a bark trunk.
   {
     const n = Math.max(1, world.pines.length);
-    const trunkGeo = new THREE.CylinderGeometry(0.14, 0.24, 2.2, 6);
-    trunkGeo.translate(0, 1.1, 0);
-    const cone1 = new THREE.ConeGeometry(2.4, 4.2, 7);
-    cone1.translate(0, 3.8, 0);
-    const cone2 = new THREE.ConeGeometry(1.8, 3.6, 7);
-    cone2.translate(0, 6.0, 0);
-    const cone3 = new THREE.ConeGeometry(1.1, 2.8, 7);
-    cone3.translate(0, 8.0, 0);
-    const trunks = new THREE.InstancedMesh(trunkGeo, new THREE.MeshStandardMaterial({ color: 0x4a3426, roughness: 1 }), n);
-    const leafMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.9, flatShading: true });
-    const c1 = new THREE.InstancedMesh(cone1, leafMat, n);
-    const c2 = new THREE.InstancedMesh(cone2, leafMat, n);
-    const c3 = new THREE.InstancedMesh(cone3, leafMat, n);
-    const palette = ["#2d4f2a", "#36592f", "#264526", "#3c5f34", "#2f4a2c"];
+    const trunkGeo = new THREE.CylinderGeometry(0.12, 0.26, 2.6, 7);
+    trunkGeo.translate(0, 1.3, 0);
+    const tier = (r: number, h: number, y: number, seed: number) => {
+      const g = new THREE.ConeGeometry(r, h, 9, 1, true);
+      const p = g.getAttribute("position") as THREE.BufferAttribute;
+      const lr = mulberry32(seed);
+      for (let i = 0; i < p.count; i++) {
+        // Ragged, drooping skirt: lower rim vertices pulled down/out unevenly.
+        if (p.getY(i) < -h / 2 + 0.01) {
+          const k = 0.88 + lr() * 0.28;
+          p.setXYZ(i, p.getX(i) * k, p.getY(i) - lr() * 0.35, p.getZ(i) * k);
+        }
+      }
+      g.translate(0, y, 0);
+      return g.toNonIndexed();
+    };
+    const crownGeo = mergeGeometries([tier(2.5, 3.6, 3.4, 21), tier(2.0, 3.2, 5.1, 22), tier(1.5, 2.9, 6.7, 23), tier(0.9, 2.5, 8.2, 24)], false)!;
+    crownGeo.computeVertexNormals();
+    const trunks = new THREE.InstancedMesh(trunkGeo, barkMat, n);
+    const crowns = new THREE.InstancedMesh(crownGeo, leafMat, n);
+    const pal = ["#2d4f2a", "#36592f", "#264526", "#3c5f34", "#2f4a2c", "#33553a"];
     world.pines.forEach((t, i) => {
       q.setFromAxisAngle(up, t.rot);
-      m.compose(new THREE.Vector3(t.x, t.y, t.z), q, new THREE.Vector3(t.scale, t.scale * range(rng, 1.0, 1.4), t.scale));
-      for (const im of [trunks, c1, c2, c3]) im.setMatrixAt(i, m);
-      c.set(pick(rng, palette));
-      c1.setColorAt(i, c);
-      c2.setColorAt(i, c.clone().multiplyScalar(1.08));
-      c3.setColorAt(i, c.clone().multiplyScalar(1.16));
+      m.compose(new THREE.Vector3(t.x, t.y, t.z), q, new THREE.Vector3(t.scale, t.scale * range(rng, 1.0, 1.45), t.scale));
+      trunks.setMatrixAt(i, m);
+      crowns.setMatrixAt(i, m);
+      c.set(pick(rng, pal)).offsetHSL(0, 0, (rng() - 0.5) * 0.05);
+      crowns.setColorAt(i, c);
     });
-    for (const im of [trunks, c1, c2, c3]) {
+    for (const im of [trunks, crowns]) {
       im.count = world.pines.length;
       im.castShadow = true;
       im.receiveShadow = true;
       im.computeBoundingSphere();
     }
-    group.add(trunks, c1, c2, c3);
+    group.add(trunks, crowns);
   }
   return group;
+}
+
+/**
+ * Leaves: flat-shaded, per-instance colour, with cheap ambient occlusion in
+ * the shader - parts of the crown that face down or lie low inside it are
+ * darker, the sunlit top is brighter and slightly yellow. Reads as foliage
+ * volume at any distance without extra geometry.
+ */
+function leafMaterial(): THREE.MeshStandardMaterial {
+  const mat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.85, flatShading: true });
+  mat.onBeforeCompile = (shader) => {
+    shader.vertexShader = shader.vertexShader
+      .replace("#include <common>", "#include <common>\nvarying float vLeafAO;")
+      .replace(
+        "#include <begin_vertex>",
+        `#include <begin_vertex>
+        // Height inside the crown (object space) and normal direction.
+        vLeafAO = clamp(0.55 + 0.45 * normal.y, 0.35, 1.0) * clamp(0.6 + position.y * 0.07, 0.6, 1.15);`,
+      );
+    shader.fragmentShader = shader.fragmentShader
+      .replace("#include <common>", "#include <common>\nvarying float vLeafAO;")
+      .replace(
+        "#include <color_fragment>",
+        `#include <color_fragment>
+        diffuseColor.rgb *= vLeafAO;
+        diffuseColor.rgb += vec3(0.03, 0.035, 0.0) * smoothstep(0.9, 1.15, vLeafAO);`,
+      );
+  };
+  return mat;
 }
 
 function buildBarriers(world: World): THREE.Group {

@@ -442,3 +442,117 @@ export function billboard(color: string, seed: number): THREE.CanvasTexture {
   const t = tex(c, true, false);
   return t;
 }
+
+
+/** Shop windows: 4 different shopfronts side by side (glazing with displays, a door); lit at night. */
+export function shopfront(): { map: THREE.CanvasTexture; emissive: THREE.CanvasTexture } {
+  const rng = mulberry32(77);
+  const W = 512;
+  const H = 128;
+  const [c, ctx] = canvas(W, H);
+  const [e, ectx] = canvas(W, H);
+  ectx.fillStyle = "#000";
+  ectx.fillRect(0, 0, W, H);
+  for (let i = 0; i < 4; i++) {
+    const x0 = i * 128;
+    // Frame.
+    ctx.fillStyle = "#2b2f33";
+    ctx.fillRect(x0, 0, 128, H);
+    // Glass with an interior and goods on shelves.
+    const glass = ctx.createLinearGradient(0, 0, 0, H);
+    glass.addColorStop(0, "#5d6b78");
+    glass.addColorStop(1, "#2e3842");
+    ctx.fillStyle = glass;
+    ctx.fillRect(x0 + 6, 6, 80, H - 12);
+    for (let k = 0; k < 14; k++) {
+      ctx.fillStyle = `hsl(${Math.floor(rng() * 360)},${40 + rng() * 30}%,${45 + rng() * 25}%)`;
+      ctx.fillRect(x0 + 10 + rng() * 66, 30 + Math.floor(rng() * 4) * 22, 6 + rng() * 10, 10 + rng() * 8);
+    }
+    // Reflection streak.
+    ctx.fillStyle = "rgba(255,255,255,0.12)";
+    ctx.beginPath();
+    ctx.moveTo(x0 + 20, 6);
+    ctx.lineTo(x0 + 40, 6);
+    ctx.lineTo(x0 + 14, H - 6);
+    ctx.lineTo(x0 + 6, H - 6);
+    ctx.fill();
+    // Door.
+    ctx.fillStyle = "#3b4651";
+    ctx.fillRect(x0 + 92, 14, 30, H - 14);
+    ctx.fillStyle = "#c9ced3";
+    ctx.fillRect(x0 + 115, 66, 3, 14);
+    // Night: warm interior light.
+    const warm = ["#ffe2a8", "#fff4dc", "#d8ecff", "#ffd0a0"][i];
+    ectx.fillStyle = warm;
+    ectx.globalAlpha = 0.85;
+    ectx.fillRect(x0 + 6, 6, 80, H - 12);
+    ectx.globalAlpha = 0.5;
+    ectx.fillRect(x0 + 92, 14, 30, H - 14);
+    ectx.globalAlpha = 1;
+  }
+  return { map: tex(c, true, false), emissive: tex(e, true, false) };
+}
+
+/** Classic striped awning canvas (tinted per shop by vertex colour). */
+export function awningStripes(): THREE.CanvasTexture {
+  const [c, ctx] = canvas(128, 64);
+  for (let x = 0; x < 128; x += 16) {
+    ctx.fillStyle = (x / 16) % 2 ? "#ffffff" : "#d8d8d8";
+    ctx.fillRect(x, 0, 16, 64);
+  }
+  // Scalloped valance edge.
+  ctx.fillStyle = "rgba(0,0,0,0.18)";
+  for (let x = 0; x < 128; x += 16) {
+    ctx.beginPath();
+    ctx.arc(x + 8, 60, 8, 0, Math.PI);
+    ctx.fill();
+  }
+  return tex(c);
+}
+
+/** Rooftop AC unit: louvred sides with a fan grille on top. */
+export function hvacTex(): THREE.CanvasTexture {
+  const [c, ctx] = canvas(128);
+  ctx.fillStyle = "#cfd2d4";
+  ctx.fillRect(0, 0, 128, 128);
+  ctx.fillStyle = "rgba(0,0,0,0.28)";
+  for (let y = 10; y < 118; y += 8) ctx.fillRect(8, y, 112, 3);
+  ctx.strokeStyle = "rgba(0,0,0,0.35)";
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.arc(64, 64, 34, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.beginPath();
+  for (let k = 0; k < 4; k++) {
+    const a = (k / 4) * Math.PI * 2;
+    ctx.moveTo(64, 64);
+    ctx.lineTo(64 + Math.cos(a) * 32, 64 + Math.sin(a) * 32);
+  }
+  ctx.stroke();
+  return tex(c);
+}
+
+
+/** Bark: vertical fissures in grey-brown (trees, wood posts). */
+export function bark(): THREE.CanvasTexture {
+  const rng = mulberry32(31);
+  const [c, ctx] = canvas(64, 128);
+  ctx.fillStyle = "#5b4433";
+  ctx.fillRect(0, 0, 64, 128);
+  for (let i = 0; i < 40; i++) {
+    const x = rng() * 64;
+    ctx.strokeStyle = rng() < 0.5 ? "rgba(30,20,14,0.55)" : "rgba(140,115,95,0.35)";
+    ctx.lineWidth = 1 + rng() * 2.5;
+    ctx.beginPath();
+    ctx.moveTo(x, 0);
+    let y = 0;
+    let xx = x;
+    while (y < 128) {
+      y += 6 + rng() * 10;
+      xx += (rng() - 0.5) * 4;
+      ctx.lineTo(xx, y);
+    }
+    ctx.stroke();
+  }
+  return tex(c);
+}
